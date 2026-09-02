@@ -1,0 +1,8 @@
+GASLESS
+Copyright 2026 GASLESS contributors
+
+The GASLESS source code is licensed under Apache License 2.0.
+
+The project uses the Nippo and Author typefaces through Fontshare's official hosted CSS service. Font binaries are not redistributed in this repository. Those typefaces remain subject to the Indian Type Foundry Free Font License.
+
+Wallet, protocol, token, and network names and marks are used for identification only and remain the property of their respective owners. Runtime wallet icons are supplied by compatible wallet connectors; this repository does not redistribute third-party wallet icon binaries.

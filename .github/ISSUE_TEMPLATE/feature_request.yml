@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: input
+    id: context
+    attributes:
+      label: Network and action context
+      placeholder: Solana / Send
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -94,6 +94,18 @@ test('emergency controls fail closed for global, relayer, action, and wrong netw
   await expectCode(() => controls.assertExecutionAllowed('DEVNET_PROOF', 'mainnet-beta'), 'ACTION_DISABLED');
 });
 
+test('Mainnet and dedicated cross-chain controls independently fail closed', async () => {
+  const store = new MemoryDurableStore();
+  store.controls.mainnetEnabled = false;
+  const controls = new EmergencyControlService(store);
+  await expectCode(() => controls.assertExecutionAllowed('CROSS_CHAIN', 'mainnet-beta'), 'ACTION_DISABLED');
+  await expectCode(() => controls.assertExecutionAllowed('SEND', 'mainnet-beta'), 'ACTION_DISABLED');
+  store.controls.mainnetEnabled = true;
+  store.controls.crossChainEnabled = false;
+  await expectCode(() => controls.assertExecutionAllowed('CROSS_CHAIN', 'mainnet-beta'), 'ACTION_DISABLED');
+  await controls.assertExecutionAllowed('SEND', 'mainnet-beta');
+});
+
 test('canonical lifecycle submits final simulated bytes once and reconciles idempotently', async () => {
   const wallet = Keypair.generate();
   const payer = Keypair.generate();

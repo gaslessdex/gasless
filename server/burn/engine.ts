@@ -153,11 +153,11 @@ export class BurnEngine {
   async abortWalletApproval(quoteId: string, walletAddress: string, reason: string, userSignatureReturned: boolean) {
     const quote = await this.requireWalletQuote(quoteId, walletAddress, true); const prepared = quote.burn!.prepared!;
     if (quote.status === 'failed') return { status: 'failed' as const };
-    const allowed = new Set(['USER_EXPLICITLY_CANCELLED', 'WALLET_SIGNING_TIMEOUT', 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN', 'WALLET_PROVIDER_ERROR', 'WALLET_ACCOUNT_CHANGED', 'APP_ABORTED_SIGNING_FLOW', 'SESSION_DISCONNECTED', 'UNKNOWN_WALLET_FAILURE']);
+    const allowed = new Set(['USER_EXPLICITLY_CANCELLED', 'WALLET_SIGNING_TIMEOUT', 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN', 'WALLET_PROVIDER_ERROR', 'POST_SIGN_VERIFICATION_FAILED', 'WALLET_ACCOUNT_CHANGED', 'APP_ABORTED_SIGNING_FLOW', 'SESSION_DISCONNECTED', 'UNKNOWN_WALLET_FAILURE']);
     if (!allowed.has(reason)) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'Unknown wallet failure.');
     const blockHeight = await this.rpc.getBlockHeight(); const remainingBlocks = prepared.lastValidBlockHeight - blockHeight;
     if (reason === 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN' && !userSignatureReturned && remainingBlocks >= 0) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The wallet attempt is not yet provably expired.');
-    if (userSignatureReturned && remainingBlocks >= SEND_POST_SIGNATURE_BLOCK_MARGIN) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The signed Burn still has a safe submission margin.');
+    if (reason === 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN' && userSignatureReturned && remainingBlocks >= SEND_POST_SIGNATURE_BLOCK_MARGIN) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The signed Burn still has a safe submission margin.');
     await this.failAfterWallet(quote, reason, userSignatureReturned, blockHeight);
     return { status: 'failed' as const };
   }

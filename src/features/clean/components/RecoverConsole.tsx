@@ -33,7 +33,7 @@ export function RecoverConsole({ connected, onConnect }: { connected: boolean; o
   const [selected, setSelected] = useState<RecoverAccount>();
   const [confirmed, setConfirmed] = useState(false);
   const signingLocked = useRef(false);
-  const tokens = useMemo<TokenOption[]>(() => (view.discovery?.eligibleAccounts ?? []).map((account) => ({ id: account.address, mint: account.mint, program: account.tokenProgram, symbol: account.symbol ?? shortMint(account.mint), name: 'Approved fungible token', balance: amount(account.tokenAmountRaw, account.decimals), eligible: true })), [view.discovery]);
+  const tokens = useMemo<TokenOption[]>(() => (view.discovery?.eligibleAccounts ?? []).map((account) => ({ id: account.address, mint: account.mint, program: account.tokenProgram, symbol: account.symbol ?? shortMint(account.mint), name: account.name ?? 'Approved fungible token', image: account.image, balance: amount(account.tokenAmountRaw, account.decimals), eligible: true })), [view.discovery]);
   const selectedToken = selected ? tokens.find((token) => token.id === selected.address) ?? null : null;
 
   const scan = async () => {
@@ -104,7 +104,7 @@ export function RecoverConsole({ connected, onConnect }: { connected: boolean; o
   const handlePrimary = () => { if (!connected) onConnect(); else if (view.state === 'ready') void submit(); else if (selected) void preview(selected); else void scan(); };
   return <div id="clean-panel-recover" role="tabpanel" aria-labelledby="clean-tab-recover" className="clean-mode-panel recover-panel">
     <div className="console-lead"><span className="eyebrow">CLEAN / RECOVER VALUE</span><h3>{view.state === 'confirmed' ? 'Recovered successfully.' : 'Convert a complete approved token balance to SOL.'}</h3><p>Only exact whitelisted legacy SPL tokens with a live Jupiter route are shown. Nothing is preselected.</p></div>
-    <div className="transaction-field"><div className="field-heading"><span>TOKEN</span><span>{selected ? `FULL BALANCE ${selectedAmount}` : 'FULL BALANCE ONLY'}</span></div><TokenSelector label="Token to recover" value={selectedToken} tokens={tokens} onChange={(token) => { const account = view.discovery?.eligibleAccounts.find((item) => item.address === token.id); if (account) void preview(account); }} /></div>
+    <div className="transaction-field selector-field"><div className="field-heading"><span>TOKEN</span><span>{selected ? `FULL BALANCE ${selectedAmount}` : 'FULL BALANCE ONLY'}</span></div><TokenSelector label="Token to recover" value={selectedToken} tokens={tokens} onChange={(token) => { const account = view.discovery?.eligibleAccounts.find((item) => item.address === token.id); if (account) void preview(account); }} /></div>
     <div className="summary-line"><span>ESTIMATED OUTPUT</span><strong>{sol(view.recover?.estimatedSwapOutputLamports)}</strong></div>
     <GaslessStatus connected={connected} />
     <div className="receive-line"><span>ESTIMATED MINIMUM YOU RECEIVE</span><strong>{sol(view.recover?.minimumUserPayoutLamports)}</strong></div>

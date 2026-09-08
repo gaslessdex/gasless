@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { BurnAccount, BurnDiscoveryResult, BurnQuoteDetails } from '../../../../shared/transactions/types';
 import { DetailRow, DetailSection, GaslessStatus, TokenSelector, type TokenOption } from '../../../components/ui/TransactionControls';
+import { getSolanaTokenMetadata } from '../../../config/solanaTokenRegistry';
 import { useWallet } from '../../../wallet/walletContext';
 import { appNetwork, appNetworkLabel, explorerTransactionUrl } from '../../../config/network';
 import { awaitWalletApproval } from '../../transactions/walletApproval';
@@ -42,7 +43,7 @@ export function BurnConsole({ connected, onConnect }: { connected: boolean; onCo
   const resetTimer = useRef<number | undefined>(undefined);
   const liveWalletAddress = useRef(wallet.account?.address);
   liveWalletAddress.current = wallet.account?.address;
-  const tokens = useMemo<TokenOption[]>(() => (view.discovery?.eligibleAccounts ?? []).map((account) => ({ id: account.address, mint: account.mint, program: account.tokenProgram, symbol: `TOKEN ${shortMint(account.mint)}`, name: 'Legacy SPL token', balance: amount(account.tokenAmountRaw, account.decimals), eligible: true })), [view.discovery]);
+  const tokens = useMemo<TokenOption[]>(() => (view.discovery?.eligibleAccounts ?? []).map((account) => { const metadata = getSolanaTokenMetadata(account.mint); return { id: account.address, mint: account.mint, program: account.tokenProgram, symbol: metadata?.symbol ?? `TOKEN ${shortMint(account.mint)}`, name: metadata?.name ?? 'Legacy SPL token', image: metadata?.image, balance: amount(account.tokenAmountRaw, account.decimals), eligible: true }; }), [view.discovery]);
   const selectedToken = selected ? tokens.find((token) => token.id === selected.address) ?? null : null;
 
   const showSuccess = useCallback((signature: string) => {
@@ -139,7 +140,7 @@ export function BurnConsole({ connected, onConnect }: { connected: boolean; onCo
       const approval = await approvalPromise;
       if (approval.status === 'failed') {
         await api('/api/burn/wallet-event', { sessionId, walletAddress, quoteId, event: 'failed', metadata: { classification: approval.classification, elapsedMs: approval.elapsedMs } }).catch(() => undefined);
-        await api('/api/burn/abort-wallet-approval', { sessionId, walletAddress, quoteId, reason: approval.classification, userSignatureReturned: false }).catch(() => undefined);
+        await api('/api/burn/abort-wallet-approval', { sessionId, walletAddress, quoteId, reason: approval.classification, userSignatureReturned: approval.userSignatureReturned }).catch(() => undefined);
         throw new Error(approval.classification === 'USER_EXPLICITLY_CANCELLED' ? 'Burn approval was cancelled. Nothing was submitted.' : 'The wallet could not approve this Burn. Nothing was submitted.');
       }
       if (approval.status === 'expired') {
@@ -174,7 +175,7 @@ export function BurnConsole({ connected, onConnect }: { connected: boolean; onCo
     {confettiCount > 0 && <div className="swap-confetti" aria-hidden="true">{Array.from({ length: confettiCount }, (_, index) => <i key={index} style={particleStyle(index)} />)}</div>}
     {successToast && <div className="swap-success-toast burn-success-toast" role="status">Burn complete · <a href={explorerTransactionUrl(successToast)} target="_blank" rel="noreferrer">View transaction</a><button type="button" aria-label="Dismiss Burn completion" onClick={() => setSuccessToast(undefined)}>×</button></div>}
     <div className="console-lead"><span className="eyebrow">CLEAN / BURN</span><h3>{view.state === 'confirmed' ? 'Burn complete.' : 'Burn a complete eligible token balance.'}</h3><p className="burn-warning">{view.burn && burnedAmount ? `This permanently destroys your entire ${burnedAmount} TOKEN ${shortMint(view.burn.account.mint)} balance in this account. This cannot be undone.` : 'Your entire selected token-account balance will be permanently destroyed. This cannot be undone.'}</p>{view.burn?.account.recoverValueAvailable && <p>Want to keep the value instead? Use Recover Value.</p>}</div>
-    <div className="transaction-field"><div className="field-heading"><span>TOKEN</span><span>{selected ? `BALANCE ${amount(selected.tokenAmountRaw, selected.decimals)}` : 'FULL BALANCE ONLY'}</span></div><TokenSelector label="Token to burn" value={selectedToken} tokens={tokens} onChange={(token) => { const account = view.discovery?.eligibleAccounts.find((item) => item.address === token.id); if (account) void preview(account); }} /></div>
+    <div className="transaction-field selector-field"><div className="field-heading"><span>TOKEN</span><span>{selected ? `FULL BALANCE ${amount(selected.tokenAmountRaw, selected.decimals)}` : 'FULL BALANCE ONLY'}</span></div><TokenSelector label="Token to burn" value={selectedToken} tokens={tokens} onChange={(token) => { const account = view.discovery?.eligibleAccounts.find((item) => item.address === token.id); if (account) void preview(account); }} /></div>
     <div className="summary-line"><span>ACCOUNT SOL RECOVERED</span><strong>{sol(view.burn?.reclaimedRentLamports)}</strong></div>
     <div className="summary-line"><span>GASLESS SERVICE FEE (3% OF RENT)</span><strong>{sol(view.burn?.gaslessFeeLamports)}</strong></div>
     <div className="summary-line"><span>SPONSORED NETWORK COST</span><strong>{sol(view.burn?.sponsoredCostLamports)}</strong></div>

@@ -1,10 +1,12 @@
 import type { SolanaNetwork, TransactionAction } from '../../shared/transactions/types.js';
-import type { ApprovedDexFamily } from '../jupiter/service.js';
+import type { SolanaRegistryToken } from '../../chains/solana/token-registry/types.js';
+import { RAYDIUM_CLMM_DEX, type ApprovedDexFamily } from '../jupiter/service.js';
 import type { DynamicTokenStore } from './dynamic.js';
 
 export type TokenDecision = 'supported' | 'unsupported' | 'blocked' | 'unknown' | 'not_applicable';
 export interface TokenRegistryEntry {
-  mint: string; symbol: string; name?: string; decimals: number; tokenProgram: string; extensions: string[];
+  mint: string; symbol: string; name?: string; image?: string; decimals: number; tokenProgram: string; extensions: string[];
+  token2022Profile?: SolanaRegistryToken['token2022Profile'];
   status: TokenDecision; enabledActions: TransactionAction[]; feePaymentEnabled?: boolean;
   swapInputEnabled?: boolean; swapOutputEnabled?: boolean;
   approvedDexFamilies?: ApprovedDexFamily[];
@@ -38,12 +40,17 @@ export class ServerTokenRegistry implements TokenRegistry {
     }
     return [...merged.values()];
   }
-  async evaluate(action: TransactionAction, mint?: string) {
+  private recoverEntry(mint: string): TokenRegistryEntry {
+    const configured = [...this.sendTokens, ...this.swapTokens].find((entry) => entry.mint === mint);
+    return configured ? { ...configured, enabledActions: [...new Set([...configured.enabledActions, 'CLEAN_RECOVER' as const])], approvedDexFamilies: configured.approvedDexFamilies?.length ? configured.approvedDexFamilies : [RAYDIUM_CLMM_DEX] } : { mint, symbol: mint, decimals: 0, tokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', extensions: [], status: 'supported', enabledActions: ['CLEAN_RECOVER'], approvedDexFamilies: [RAYDIUM_CLMM_DEX] };
+  }
+  async evaluate(action: TransactionAction, mint?: string): Promise<{ decision: TokenDecision; entry?: TokenRegistryEntry }> {
     if (action === 'DEVNET_PROOF') return { decision: 'not_applicable' as const };
     const dynamic = await this.dynamicEntries();
     const dynamicEntry = dynamic.find((entry) => entry.mint === mint);
-    if (action === 'CLEAN_RECOVER' && mint && (this.isPaused(mint, 'CLEAN_RECOVER') || dynamicEntry?.paused || dynamicEntry?.pausedCapabilities?.includes('CLEAN_RECOVER'))) return { decision: 'blocked' as const };
-    if (action === 'CLEAN_RECOVER' && mint && (this.recoverMints.has(mint) || dynamicEntry?.capabilities.includes('CLEAN_RECOVER'))) return { decision: 'supported' as const, entry: dynamicEntry };
+    if (action === 'CLEAN_RECOVER' && mint && (this.isPaused(mint, 'CLEAN_RECOVER') || dynamicEntry?.paused || dynamicEntry?.pausedCapabilities?.includes('CLEAN_RECOVER'))) return { decision: 'blocked' as const, entry: dynamicEntry };
+    if (action === 'CLEAN_RECOVER' && mint && dynamicEntry?.capabilities.includes('CLEAN_RECOVER') && dynamicEntry.approvedDexFamilies?.length) return { decision: 'supported' as const, entry: dynamicEntry };
+    if (action === 'CLEAN_RECOVER' && mint && this.recoverMints.has(mint)) return { decision: 'supported', entry: this.recoverEntry(mint) };
     if (action === 'SEND' && mint) {
       const entry = (await this.effectiveEntries(this.sendTokens)).find((token) => token.mint === mint);
       if (entry && (this.isPaused(mint, 'SEND') || entry.pausedCapabilities?.includes('SEND'))) return { decision: 'blocked' as const, entry };
@@ -59,9 +66,14 @@ export class ServerTokenRegistry implements TokenRegistry {
     }
     return { decision: 'unsupported' as const };
   }
-  async list(action: TransactionAction) {
+  async list(action: TransactionAction): Promise<TokenRegistryEntry[]> {
     if (action === 'SEND') return (await this.effectiveEntries(this.sendTokens)).filter((entry) => entry.status === 'supported' && entry.feePaymentEnabled && entry.enabledActions.includes('SEND') && !this.isPaused(entry.mint, 'SEND') && !entry.pausedCapabilities?.includes('SEND')).map((entry) => ({ ...entry }));
     if (action === 'SWAP') return (await this.effectiveEntries(this.swapTokens)).filter((entry) => entry.status === 'supported' && entry.enabledActions.includes('SWAP') && !(['SWAP_INPUT', 'SWAP_OUTPUT'] as const).every((capability) => this.isPaused(entry.mint, capability) || entry.pausedCapabilities?.includes(capability))).map((entry) => ({ ...entry, swapInputEnabled: Boolean(entry.swapInputEnabled && !this.isPaused(entry.mint, 'SWAP_INPUT') && !entry.pausedCapabilities?.includes('SWAP_INPUT')), swapOutputEnabled: Boolean(entry.swapOutputEnabled && !this.isPaused(entry.mint, 'SWAP_OUTPUT') && !entry.pausedCapabilities?.includes('SWAP_OUTPUT')) }));
+    if (action === 'CLEAN_RECOVER') {
+      const dynamic = (await this.dynamicEntries()).filter((entry) => entry.status === 'supported' && entry.capabilities.includes('CLEAN_RECOVER') && entry.approvedDexFamilies?.length && !entry.paused && !this.isPaused(entry.mint, 'CLEAN_RECOVER') && !entry.pausedCapabilities?.includes('CLEAN_RECOVER'));
+      const seen = new Set(dynamic.map((entry) => entry.mint));
+      return [...dynamic, ...[...this.recoverMints].filter((mint) => !seen.has(mint)).map((mint) => this.recoverEntry(mint))];
+    }
     return [];
   }
 }

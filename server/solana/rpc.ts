@@ -1,5 +1,8 @@
 import { GaslessError } from '../errors.js';
+import { AddressLookupTableAccount, AddressLookupTableProgram, PublicKey } from '@solana/web3.js';
 import { log } from '../observability/logger.js';
+import { requestWithBackoff } from '../network/retry.js';
+import { countApiUsage } from '../observability/api-usage.js';
 
 interface RpcEndpoint { url: string; name: 'helius' | 'fallback'; }
 interface RpcResponse<T> { result?: T; error?: { code: number; message: string; data?: unknown }; }
@@ -19,6 +22,7 @@ export interface RpcInnerInstruction {
   accounts?: number[] | string[];
   data?: string;
   stackHeight?: number | null;
+  parsed?: { type?: string; info?: Record<string, unknown> };
 }
 export interface RpcInnerInstructionGroup { index: number; instructions: RpcInnerInstruction[] }
 
@@ -48,7 +52,7 @@ export class SolanaRpc {
     for (const endpoint of allowFallback ? this.endpoints : this.endpoints.slice(0, 1)) {
       try {
         await this.assertNetwork(endpoint);
-        const response = await this.request(endpoint.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomUUID(), method, params }), signal: AbortSignal.timeout(10_000) });
+        const response = await requestWithBackoff(() => { countApiUsage('rpcRequests'); return this.request(endpoint.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomUUID(), method, params }), signal: AbortSignal.timeout(10_000) }); }, { onRetry: (status, delayMs) => { if (status === 429) countApiUsage('rateLimitedResponses'); log('warn', 'rpc_retry_scheduled', { provider: endpoint.name, method, status, delayMs }); } });
         const payload = await response.json() as RpcResponse<T>;
         if (!response.ok || payload.error || payload.result === undefined) throw new Error(payload.error?.message ?? `HTTP ${response.status}`);
         return { value: payload.result, provider: endpoint.name };
@@ -68,6 +72,9 @@ export class SolanaRpc {
   async getFeeForMessage(serializedMessage: string) { return this.call<{ value: number | null }>('getFeeForMessage', [serializedMessage, { commitment: 'confirmed' }]).then(({ value }) => value.value); }
   async simulateTransaction(serialized: string, sigVerify: boolean) {
     return this.call<{ value: { err: unknown; logs: string[] | null; unitsConsumed?: number; innerInstructions?: RpcInnerInstructionGroup[] | null } }>('simulateTransaction', [serialized, { encoding: 'base64', commitment: 'confirmed', sigVerify, replaceRecentBlockhash: false, innerInstructions: true }]).then(({ value, provider }) => ({ ...value.value, provider }));
+  }
+  async simulateTransactionWithAccounts(serialized: string, sigVerify: boolean, addresses: string[]) {
+    return this.call<{ value: { err: unknown; logs: string[] | null; unitsConsumed?: number; innerInstructions?: RpcInnerInstructionGroup[] | null; accounts?: Array<RpcAccountInfo | null> } }>('simulateTransaction', [serialized, { encoding: 'base64', commitment: 'confirmed', sigVerify, replaceRecentBlockhash: false, innerInstructions: true, accounts: { encoding: 'base64', addresses } }]).then(({ value, provider }) => ({ ...value.value, provider }));
   }
   async sendRawTransaction(serialized: string) {
     // Never blind-retry submission across providers. Reconciliation owns ambiguous outcomes.
@@ -146,6 +153,12 @@ export class SolanaRpc {
   async getBalance(address: string) { return this.call<{ value: number }>('getBalance', [address, { commitment: 'confirmed' }]).then(({ value }) => value.value); }
   async getMinimumBalanceForRentExemption(dataLength: number) { return this.call<number>('getMinimumBalanceForRentExemption', [dataLength, { commitment: 'confirmed' }]).then(({ value }) => value); }
   async getAccountInfo(address: string) { return this.call<{ value: RpcAccountInfo | null }>('getAccountInfo', [address, { commitment: 'confirmed', encoding: 'base64' }]).then(({ value }) => value.value); }
+  async getAddressLookupTable(address: string) {
+    const account = await this.getAccountInfo(address);
+    if (!account || account.owner !== AddressLookupTableProgram.programId.toBase58() || account.executable || account.data[1] !== 'base64') return null;
+    try { return new AddressLookupTableAccount({ key: new PublicKey(address), state: AddressLookupTableAccount.deserialize(Buffer.from(account.data[0], 'base64')) }); }
+    catch { return null; }
+  }
   async getMultipleAccounts(addresses: string[]) { return this.call<{ value: Array<RpcAccountInfo | null> }>('getMultipleAccounts', [addresses, { commitment: 'confirmed', encoding: 'base64' }]).then(({ value }) => value.value); }
   async getTokenAccountsByOwner(owner: string, programId: string) {
     return this.call<{ value: Array<{ pubkey: string; account: RpcAccountInfo }> }>('getTokenAccountsByOwner', [owner, { programId }, { commitment: 'confirmed', encoding: 'base64' }]).then(({ value }) => value.value);

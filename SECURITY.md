@@ -14,6 +14,6 @@ We will acknowledge a report, assess severity, coordinate remediation, and discl
 
 ## Scope
 
-Relevant areas include transaction construction and validation, wallet authorization, relayer policy, sponsorship limits, replay protection, simulation, token and route policy, accounting, and public data redaction.
+Relevant areas include transaction construction and validation, wallet authorization, relayer and Relay policy, source/destination domain binding, sponsorship limits, replay protection, simulation, token and route policy, accounting, and public data redaction.
 
 The public repository intentionally excludes production credentials, private operator tooling, pilot allowlists, signer configuration, and sensitive operational policy. Their absence is not evidence that a production control is missing.

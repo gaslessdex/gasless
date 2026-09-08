@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import darkLogo from '../../../../assets/brand/word-logo-darkmode.png';
-import lightLogo from '../../../../assets/brand/word-logo-lightmode.png';
 
 const CLOSE_DELAY_MS = 150;
+const SHEET_MENU_QUERY = '(max-width: 1024px), (hover: none), (pointer: coarse)';
 
 export function SteeringWheel({ onFaqSelect, onMobileMenu }: { onFaqSelect: () => void; onMobileMenu: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -11,6 +10,7 @@ export function SteeringWheel({ onFaqSelect, onMobileMenu }: { onFaqSelect: () =
   const pointerPoint = useRef({ x: 0, y: 0 });
 
   const cancelClose = () => window.clearTimeout(closeTimer.current);
+  const usesSheetMenu = () => matchMedia(SHEET_MENU_QUERY).matches;
   const openMenu = () => {
     cancelClose();
     setMenuOpen(true);
@@ -83,10 +83,9 @@ export function SteeringWheel({ onFaqSelect, onMobileMenu }: { onFaqSelect: () =
       >
         <div className="cockpit-nav__inner">
           <a className="cockpit-nav__logo" href="#home" aria-label="GASLESS home" onClick={() => setMenuOpen(false)} tabIndex={menuOpen ? 0 : -1}>
-            <img className="logo-light" src={darkLogo} alt="GASLESS" />
-            <img className="logo-dark" src={lightLogo} alt="" />
+            <span className="cockpit-nav__brand">GASLESS</span>
           </a>
-          <a className="cockpit-nav__text" href="https://github.com/gaslessdex/gasless" target="_blank" rel="noreferrer" tabIndex={menuOpen ? 0 : -1}>GITHUB</a>
+          <a className="cockpit-nav__text" href="https://github.com/gaslessdex" target="_blank" rel="noreferrer" tabIndex={menuOpen ? 0 : -1}>GITHUB</a>
           <a className="cockpit-nav__text" href="https://x.com/gaslessdex" target="_blank" rel="noreferrer" tabIndex={menuOpen ? 0 : -1}>TWITTER</a>
           <button className="cockpit-nav__text" type="button" onClick={() => { setMenuOpen(false); onFaqSelect(); }} tabIndex={menuOpen ? 0 : -1}>FAQ</button>
           <a className="cockpit-nav__token" href="#gasless-token" onClick={() => setMenuOpen(false)} tabIndex={menuOpen ? 0 : -1}><span>GASLESS TOKEN</span></a>
@@ -100,9 +99,10 @@ export function SteeringWheel({ onFaqSelect, onMobileMenu }: { onFaqSelect: () =
         aria-label="Toggle GASLESS navigation"
         onPointerEnter={() => { if (matchMedia('(hover: hover)').matches) openMenu(); }}
         onPointerLeave={scheduleClose}
-        onFocus={openMenu}
+        onFocus={() => { if (!usesSheetMenu()) openMenu(); }}
         onClick={(event) => {
-          if (matchMedia('(max-width: 760px)').matches) {
+          if (usesSheetMenu()) {
+            setMenuOpen(false);
             event.currentTarget.blur();
             onMobileMenu();
           } else openMenu();

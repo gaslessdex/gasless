@@ -5,11 +5,12 @@ import { log } from '../observability/logger.js';
 
 export interface RelayerProvider {
   getFeePayerPublicKey(): Promise<string>;
-  signTransaction(serializedTransaction: string, options?: { recoverAuthorization?: RecoverAuthorization }): Promise<string>;
+  signTransaction(serializedTransaction: string, options?: { recoverAuthorization?: RecoverAuthorization; relayAuthorization?: RelayAuthorization }): Promise<string>;
   assertNetworkIdentity?(rpc: { isBlockhashValid(blockhash: string): Promise<boolean> }): Promise<void>;
 }
 
 export interface RecoverAuthorization { payload: string; signature: string }
+export interface RelayAuthorization { payload: string; signature: string }
 
 export type KoraErrorCategory = 'KORA_POLICY_INVALID_TRANSACTION' | 'KORA_SIGNER_ERROR' | 'KORA_RPC_ERROR' | 'KORA_AUTH_ERROR' | 'KORA_RATE_LIMIT' | 'KORA_MALFORMED_RESPONSE';
 export class KoraCallFailure extends Error {
@@ -62,8 +63,8 @@ export class KoraRelayerProvider implements RelayerProvider {
     catch { throw new GaslessError('RELAYER_POLICY_REJECTED', 'relayer', 'Kora returned an invalid fee payer.'); }
     return this.signer;
   }
-  async signTransaction(serializedTransaction: string, options?: { recoverAuthorization?: RecoverAuthorization }) {
-    const result = await this.call<{ signed_transaction?: string; signer_pubkey?: string }>('signTransaction', { transaction: serializedTransaction, ...(options?.recoverAuthorization ? { recover_authorization: options.recoverAuthorization } : {}) });
+  async signTransaction(serializedTransaction: string, options?: { recoverAuthorization?: RecoverAuthorization; relayAuthorization?: RelayAuthorization }) {
+    const result = await this.call<{ signed_transaction?: string; signer_pubkey?: string }>('signTransaction', { transaction: serializedTransaction, ...(options?.recoverAuthorization ? { recover_authorization: options.recoverAuthorization } : {}), ...(options?.relayAuthorization ? { relay_authorization: options.relayAuthorization } : {}) });
     if (!result.signed_transaction || !result.signer_pubkey || result.signer_pubkey !== await this.getFeePayerPublicKey()) throw koraError(new KoraCallFailure('KORA_MALFORMED_RESPONSE', 'Kora returned an unexpected signer response.', undefined, undefined, Boolean(result.signed_transaction)));
     try {
       const before = transactionMessage(serializedTransaction);
@@ -102,8 +103,9 @@ export class KoraRelayerProvider implements RelayerProvider {
     }
     if (!response.ok || body.error || !body.result) {
       const code = typeof body.error?.code === 'number' ? body.error.code : undefined; const reason = sanitizeKoraReason(body.error?.message ?? body.error?.data ?? `HTTP ${response.status}`);
-      const category: KoraErrorCategory = response.status === 401 || response.status === 403 ? 'KORA_AUTH_ERROR' : response.status === 429 ? 'KORA_RATE_LIMIT' : /sign/i.test(reason) ? 'KORA_SIGNER_ERROR' : /rpc/i.test(reason) || response.status >= 500 ? 'KORA_RPC_ERROR' : body.error ? 'KORA_POLICY_INVALID_TRANSACTION' : 'KORA_MALFORMED_RESPONSE';
-      const deterministic = category === 'KORA_POLICY_INVALID_TRANSACTION' && /invalid transaction|validation error|not in the allowed|fee payer cannot/i.test(reason);
+      const deterministicPolicyRejection = Boolean(body.error) && /invalid transaction|validation error|not in the allowed|fee payer cannot/i.test(reason);
+      const category: KoraErrorCategory = response.status === 401 || response.status === 403 ? 'KORA_AUTH_ERROR' : response.status === 429 ? 'KORA_RATE_LIMIT' : deterministicPolicyRejection ? 'KORA_POLICY_INVALID_TRANSACTION' : /sign/i.test(reason) ? 'KORA_SIGNER_ERROR' : /rpc/i.test(reason) || response.status >= 500 ? 'KORA_RPC_ERROR' : body.error ? 'KORA_POLICY_INVALID_TRANSACTION' : 'KORA_MALFORMED_RESPONSE';
+      const deterministic = category === 'KORA_POLICY_INVALID_TRANSACTION' && deterministicPolicyRejection;
       throw koraError(new KoraCallFailure(category, reason, response.status, code, false, false, deterministic));
     }
     return body.result;

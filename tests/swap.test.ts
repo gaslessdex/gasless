@@ -4,7 +4,7 @@ import { Keypair } from '@solana/web3.js';
 import { buildSwapTransaction, calculateRoutedInput, calculateSwapServiceFee, parseTokenAmount, validateSignedSwap, validateSwapProgramShape } from '../chains/solana/transactions/swap.js';
 import { calculateSponsorReimbursement } from '../chains/solana/transactions/send.js';
 import { deriveAssociatedTokenAddress } from '../chains/solana/send/accounts.js';
-import { LEGACY_TOKEN_PROGRAM_ID } from '../chains/solana/claim/accounts.js';
+import { LEGACY_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '../chains/solana/claim/accounts.js';
 import { GaslessError } from '../server/errors.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, METEORA_DLMM_DEX, METEORA_DLMM_PROGRAM_ID, PUMPSWAP_DEX, PUMPSWAP_PROGRAM_ID, RAYDIUM_CLMM_DEX, RAYDIUM_CLMM_PROGRAM_ID, JupiterService, parsePriceImpactBps, type JupiterBuild } from '../server/jupiter/service.js';
 import { ServerTokenRegistry, type TokenRegistryEntry } from '../server/token-registry/service.js';
@@ -56,6 +56,44 @@ test('Jupiter permits only unique canonical input/output ATA setup and Swap incl
   for (const unsafe of [[...build.setupInstructions, setup(output, outputMint)], [setup(Keypair.generate().publicKey.toBase58(), outputMint)]]) { const changed = structuredClone(build); changed.setupInstructions = unsafe; assert.throws(() => new JupiterService('unused', 'test').validate(changed, expected, 10)); }
   const transaction = buildSwapTransaction({ swap: { schemaVersion: 'swap-v1', inputToken: { ...entry(inputMint), balanceRaw: '100000000', sourceAccount: source, swapInputEnabled: true, swapOutputEnabled: false }, outputToken: { ...entry(outputMint, false, true), swapInputEnabled: false, swapOutputEnabled: true }, outputAccount: output, outputAtaExists: false, totalInputRaw: '100000000', routedInputRaw: build.inAmount, expectedOutputRaw: build.outAmount, minimumOutputRaw: build.otherAmountThreshold, serviceFeeBps: 30, serviceFeeRaw: '1', sponsorReimbursementRaw: '1', slippageBps: 50, priceImpactBps: 25, routeLabel: RAYDIUM_CLMM_DEX, routeFingerprint: 'x', reimbursementDestination: source, serviceFeeDestination: source, status: 'created', route: build }, build, walletAddress: wallet, feePayer: payer });
   const programs = transaction.message.compiledInstructions.map((instruction) => transaction.message.staticAccountKeys[instruction.programIdIndex]?.toBase58()); assert.equal(programs.filter((program) => program === ASSOCIATED_TOKEN_PROGRAM_ID).length, 1);
+});
+
+test('xStock Swap binds Token-2022 input settlement and output ATA creation in both directions', () => {
+  const wallet = Keypair.generate().publicKey.toBase58();
+  const payer = Keypair.generate().publicKey.toBase58();
+  const treasury = Keypair.generate().publicKey.toBase58();
+  const xstockMint = 'Xs78JED6PFZxWc2wCEPspZW9kL3Se5J7L5TChKgsidH';
+  const legacyMint = Keypair.generate().publicKey.toBase58();
+  const service = new JupiterService('unused', 'test');
+
+  const outputAccount = deriveAssociatedTokenAddress(wallet, xstockMint, TOKEN_2022_PROGRAM_ID);
+  const legacySource = deriveAssociatedTokenAddress(wallet, legacyMint);
+  const outputRoute = route(wallet, payer, legacySource, outputAccount, legacyMint, xstockMint);
+  outputRoute.setupInstructions = [{
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    accounts: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: outputAccount, isSigner: false, isWritable: true },
+      { pubkey: wallet, isSigner: false, isWritable: false },
+      { pubkey: xstockMint, isSigner: false, isWritable: false },
+      { pubkey: '11111111111111111111111111111111', isSigner: false, isWritable: false },
+      { pubkey: TOKEN_2022_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]).toString('base64'),
+  }];
+  service.validate(outputRoute, { inputMint: legacyMint, outputMint: xstockMint, inputTokenProgram: LEGACY_TOKEN_PROGRAM_ID, outputTokenProgram: TOKEN_2022_PROGRAM_ID, outputAccount, amount: outputRoute.inAmount, taker: wallet, payer, slippageBps: 50, dexes: [RAYDIUM_CLMM_DEX], maxPriceImpactBps: 100 }, 10);
+  const wrongOutputProgram = structuredClone(outputRoute);
+  wrongOutputProgram.setupInstructions[0]!.accounts[5]!.pubkey = LEGACY_TOKEN_PROGRAM_ID;
+  assert.throws(() => service.validate(wrongOutputProgram, { inputMint: legacyMint, outputMint: xstockMint, inputTokenProgram: LEGACY_TOKEN_PROGRAM_ID, outputTokenProgram: TOKEN_2022_PROGRAM_ID, outputAccount, amount: outputRoute.inAmount, taker: wallet, payer, slippageBps: 50, dexes: [RAYDIUM_CLMM_DEX] }, 10));
+
+  const xstockSource = deriveAssociatedTokenAddress(wallet, xstockMint, TOKEN_2022_PROGRAM_ID);
+  const legacyOutput = deriveAssociatedTokenAddress(wallet, legacyMint);
+  const inputRoute = route(wallet, payer, xstockSource, legacyOutput, xstockMint, legacyMint);
+  const settlement = deriveAssociatedTokenAddress(treasury, xstockMint, TOKEN_2022_PROGRAM_ID);
+  const xstockEntry: TokenRegistryEntry = { ...entry(xstockMint, true, false), decimals: 8, tokenProgram: TOKEN_2022_PROGRAM_ID, token2022Profile: { mintAccountSize: 693, tokenAccountSize: 179, transferHook: { authority: null, programId: null, extraAccountMetaList: null }, metadataPointer: null, permanentDelegate: null, defaultAccountState: 'INITIALIZED', pausable: { authority: null, paused: false }, confidentialTransferMint: null, scaledUiAmount: null } };
+  const transaction = buildSwapTransaction({ swap: { schemaVersion: 'swap-v1', inputToken: { ...xstockEntry, balanceRaw: '100000000', sourceAccount: xstockSource, swapInputEnabled: true, swapOutputEnabled: false }, outputToken: { ...entry(legacyMint, false, true), swapInputEnabled: false, swapOutputEnabled: true }, outputAccount: legacyOutput, outputAtaExists: true, totalInputRaw: '100000000', routedInputRaw: inputRoute.inAmount, expectedOutputRaw: inputRoute.outAmount, minimumOutputRaw: inputRoute.otherAmountThreshold, serviceFeeBps: 30, serviceFeeRaw: '1', sponsorReimbursementRaw: '1', slippageBps: 50, priceImpactBps: 25, routeLabel: RAYDIUM_CLMM_DEX, routeFingerprint: 'xstock-input', reimbursementDestination: settlement, serviceFeeDestination: settlement, status: 'created', route: inputRoute }, build: inputRoute, walletAddress: wallet, feePayer: payer });
+  const programs = transaction.message.compiledInstructions.map((instruction) => transaction.message.staticAccountKeys[instruction.programIdIndex]?.toBase58());
+  assert.equal(programs.filter((program) => program === TOKEN_2022_PROGRAM_ID).length, 2);
 });
 
 test('Jupiter binds each approved V1 family label to its exact program and rejects multi-family routes', () => {

@@ -108,7 +108,7 @@ function lighthouseAssertionIsSupported(transaction: VersionedTransaction, instr
 
 /**
  * Accepts byte-exact wallet output, or Phantom's observed narrow normalization:
- * LIMIT/PRICE ordering plus appended immutable Lighthouse assertion instructions.
+ * LIMIT/PRICE ordering, with or without appended immutable Lighthouse assertions.
  */
 export function validatePhantomCompatibleTransaction(prepared: VersionedTransaction, returned: VersionedTransaction): PhantomCompatibilityResult {
   if (sameBytes(prepared.message.serialize(), returned.message.serialize())) return { accepted: true, augmented: false };
@@ -119,14 +119,20 @@ export function validatePhantomCompatibleTransaction(prepared: VersionedTransact
   const preparedKeys = prepared.message.staticAccountKeys.map(String);
   const returnedKeys = returned.message.staticAccountKeys.map(String);
   const newKeys = returnedKeys.filter((key) => !preparedKeys.includes(key));
-  if (newKeys.length !== 1 || newKeys[0] !== PHANTOM_LIGHTHOUSE_PROGRAM_ID) return { accepted: false, reason: 'unsupported_static_key_change' };
-  if (returnedKeys.filter((key) => key !== PHANTOM_LIGHTHOUSE_PROGRAM_ID).join('|') !== preparedKeys.join('|')) return { accepted: false, reason: 'static_key_layout_changed' };
+  const hasLighthouse = newKeys.length === 1 && newKeys[0] === PHANTOM_LIGHTHOUSE_PROGRAM_ID;
+  if (newKeys.length > 0 && !hasLighthouse) return { accepted: false, reason: 'unsupported_static_key_change' };
+  const expectedReturnedKeyCount = preparedKeys.length + (hasLighthouse ? 1 : 0);
+  if (returnedKeys.length !== expectedReturnedKeyCount
+    || new Set(returnedKeys).size !== returnedKeys.length
+    || !preparedKeys.every((key) => returnedKeys.includes(key))) return { accepted: false, reason: 'static_key_layout_changed' };
   for (const key of preparedKeys) {
     const before = preparedKeys.indexOf(key); const after = returnedKeys.indexOf(key);
     if (staticPrivilege(prepared, before) !== staticPrivilege(returned, after)) return { accepted: false, reason: 'account_privilege_changed' };
   }
-  const lighthouseIndex = returnedKeys.indexOf(PHANTOM_LIGHTHOUSE_PROGRAM_ID);
-  if (staticPrivilege(returned, lighthouseIndex) !== '-r') return { accepted: false, reason: 'lighthouse_privilege_invalid' };
+  if (hasLighthouse) {
+    const lighthouseIndex = returnedKeys.indexOf(PHANTOM_LIGHTHOUSE_PROGRAM_ID);
+    if (staticPrivilege(returned, lighthouseIndex) !== '-r') return { accepted: false, reason: 'lighthouse_privilege_invalid' };
+  }
 
   const preparedInstructions = prepared.message.compiledInstructions;
   const returnedInstructions = returned.message.compiledInstructions;
@@ -149,6 +155,8 @@ export function validatePhantomCompatibleTransaction(prepared: VersionedTransact
   const returnedEconomics = returnedTail.slice(0, preparedEconomics.length);
   if (returnedEconomics.length !== preparedEconomics.length || !preparedEconomics.every((instruction, index) => sameInstruction(prepared, instruction, returned, returnedEconomics[index]!))) return { accepted: false, reason: 'economic_instruction_changed' };
   const assertions = returnedTail.slice(preparedEconomics.length);
+  if (!hasLighthouse && assertions.length === 0) return { accepted: true, augmented: true };
+  if (!hasLighthouse) return { accepted: false, reason: 'lighthouse_program_missing' };
   if (assertions.length < 1 || assertions.length > MAX_LIGHTHOUSE_ASSERTIONS) return { accepted: false, reason: 'lighthouse_count_invalid' };
   const preparedStaticKeys = new Set(preparedKeys);
   if (!assertions.every((instruction) => lighthouseAssertionIsSupported(returned, instruction, preparedStaticKeys))) return { accepted: false, reason: 'lighthouse_assertion_invalid' };

@@ -10,7 +10,7 @@ import { walletGateForPreparedTransaction } from '../../transactions/walletLifec
 import { confettiParticleCount, createSwapSuccessFeedbackLifecycle } from '../../swap/quoteLifecycle';
 import { discoveryReflectsClaimSettlement, nonemptySkippedAccountCount } from '../claimLifecycle';
 
-export type ClaimState = 'disconnected' | 'scanning' | 'results' | 'empty' | 'review' | 'awaiting-signature' | 'submitting' | 'pending' | 'confirmed' | 'rejected' | 'changed' | 'unavailable' | 'failure';
+export type ClaimState = 'disconnected' | 'scanning' | 'results' | 'empty' | 'review' | 'preparing' | 'awaiting-signature' | 'submitting' | 'pending' | 'confirmed' | 'rejected' | 'changed' | 'unavailable' | 'failure';
 type CleanMode = 'claim' | 'recover' | 'burn';
 type ClaimView = { state: ClaimState; sessionId?: string; quoteId?: string; discovery?: ClaimDiscoveryResult; claim?: ClaimQuoteDetails; signatures?: string[]; error?: string };
 
@@ -40,6 +40,13 @@ function encodeBase64(value: Uint8Array) {
   let binary = '';
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+function claimErrorMessage(error: unknown) {
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  if (code === 'SIMULATION_FAILED') return "The transaction couldn't be completed safely. Nothing was submitted.";
+  if (code === 'RPC_ERROR' || error instanceof TypeError) return 'Network connection failed. Please try again.';
+  return error instanceof Error ? error.message : "This claim couldn't be safely completed. Nothing was submitted.";
 }
 function pendingClaimKey(walletAddress: string) { return `gasless:pending-claim:${walletAddress}`; }
 function readPendingClaim(walletAddress: string) { try { return localStorage.getItem(pendingClaimKey(walletAddress)); } catch { return null; } }
@@ -105,11 +112,10 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
         forgetPendingClaim(wallet.account.address);
         if (prior.status === 'failed') return setView({ state: 'failure', sessionId: session.sessionId, quoteId: pendingQuoteId, error: 'This Claim did not complete on-chain. Nothing was moved.' });
       }
-      const discovery = await api<ClaimDiscoveryResult>('/api/claim/discover', { sessionId: session.sessionId, walletAddress: wallet.account.address });
-      if (!discovery.eligibleAccounts.length) return setView({ state: 'empty', sessionId: session.sessionId, discovery });
-      const quote = await api<{ quoteId: string; claim: ClaimQuoteDetails }>('/api/claim/quote', { sessionId: session.sessionId, walletAddress: wallet.account.address, clientRequestId: crypto.randomUUID() });
-      setView({ state: 'review', sessionId: session.sessionId, quoteId: quote.quoteId, discovery, claim: quote.claim });
-    } catch (error) { setView({ state: 'failure', error: error instanceof Error ? error.message : 'Claim SOL is temporarily unavailable.' }); }
+      const quote = await api<{ quoteId?: string; discovery: ClaimDiscoveryResult; claim?: ClaimQuoteDetails }>('/api/claim/quote', { sessionId: session.sessionId, walletAddress: wallet.account.address, clientRequestId: crypto.randomUUID() });
+      if (!quote.discovery.eligibleAccounts.length || !quote.quoteId || !quote.claim) return setView({ state: 'empty', sessionId: session.sessionId, discovery: quote.discovery });
+      setView({ state: 'review', sessionId: session.sessionId, quoteId: quote.quoteId, discovery: quote.discovery, claim: quote.claim });
+    } catch (error) { setView({ state: 'failure', error: claimErrorMessage(error) }); }
   };
 
   useEffect(() => {
@@ -135,6 +141,7 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
     let closedAccounts: string[] = [];
     let preparedForWallet = false; let walletOpened = false;
     try {
+      setView((current) => ({ ...current, state: 'preparing', error: undefined }));
       const prepared = await api<{ claim: ClaimQuoteDetails }>('/api/claim/prepare', { sessionId, walletAddress, quoteId });
       closedAccounts = prepared.claim.batches.flatMap((batch) => batch.accounts.map((account) => account.address));
       const responseReceivedAt = Date.now();
@@ -153,16 +160,19 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
           preparedForWallet = false;
           throw new Error('The connected wallet changed. Review the Claim again.');
         }
-        setView((current) => ({ ...current, state: 'awaiting-signature' }));
+        setView((current) => ({ ...current, state: 'awaiting-signature', claim: prepared.claim }));
         walletOpened = true; preparedForWallet = false;
         const invokedAt = new Date().toISOString();
         const approvalPromise = awaitWalletApproval({ sign: () => wallet.signTransaction(decodeBase64(batch.prepared!.serializedTransaction)), getBlockHeight: async () => (await api<{ blockHeight: number }>('/api/claim/wallet-blockheight', { sessionId, walletAddress, quoteId })).blockHeight, lastValidBlockHeight: batch.prepared.lastValidBlockHeight });
         await api('/api/claim/wallet-event', { sessionId, walletAddress, quoteId, event: 'invoked', metadata: { clientInvokedAt: invokedAt } }).catch(() => undefined);
         const approval = await approvalPromise;
         if (approval.status === 'failed') {
-          await api('/api/claim/wallet-event', { sessionId, walletAddress, quoteId, event: 'failed', metadata: { classification: approval.classification, elapsedMs: approval.elapsedMs } }).catch(() => undefined);
-          await api('/api/claim/abort-wallet-approval', { sessionId, walletAddress, quoteId, reason: approval.classification, userSignatureReturned: false }).catch(() => undefined);
-          throw new Error(approval.classification === 'USER_EXPLICITLY_CANCELLED' ? 'Claim approval was cancelled. Nothing was submitted.' : 'The wallet could not approve this Claim. Nothing was submitted.');
+          const details = approval.error && typeof approval.error === 'object' ? approval.error as Record<string, unknown> : {};
+          await api('/api/claim/wallet-event', { sessionId, walletAddress, quoteId, event: 'failed', metadata: { classification: approval.classification, elapsedMs: approval.elapsedMs, userSignatureReturned: approval.userSignatureReturned, providerCode: details.providerCode, providerName: details.providerName, providerMessage: details.providerMessage, mutationDiagnostics: details.mutationDiagnostics } }).catch(() => undefined);
+          await api('/api/claim/abort-wallet-approval', { sessionId, walletAddress, quoteId, reason: approval.classification, userSignatureReturned: approval.userSignatureReturned }).catch(() => undefined);
+          if (approval.classification === 'USER_EXPLICITLY_CANCELLED') throw new Error('You cancelled the transaction.');
+          if (approval.classification === 'POST_SIGN_VERIFICATION_FAILED') throw new Error("We couldn't verify the signed transaction. Nothing was submitted.");
+          throw new Error("Your wallet couldn't sign this transaction.");
         }
         if (approval.status === 'expired') {
           await api('/api/claim/wallet-event', { sessionId, walletAddress, quoteId, event: 'expired', metadata: { classification: approval.classification, elapsedMs: approval.elapsedMs, userSignatureReturned: approval.userSignatureReturned, blockHeight: approval.blockHeight, remainingBlocks: approval.remainingBlocks } }).catch(() => undefined);
@@ -185,7 +195,7 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
       await refreshAfterSuccess(sessionId, walletAddress, signatures, closedAccounts);
     } catch (error) {
       if (preparedForWallet && !walletOpened) await api('/api/claim/abort-wallet-gate', { sessionId, walletAddress, quoteId, reason: 'final_gate_unavailable' }).catch(() => undefined);
-      const message = error instanceof Error ? error.message : "This claim couldn't be safely completed. Nothing was submitted.";
+      const message = claimErrorMessage(error);
       const code = (error as Error & { code?: string }).code;
       setView((current) => ({ ...current, state: code === 'RECONCILIATION_FAILED' ? 'pending' : /reject|cancel/i.test(message) ? 'rejected' : 'failure', error: message, signatures }));
     } finally {
@@ -193,13 +203,13 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
     }
   };
 
-  const claimBusy = ['scanning', 'awaiting-signature', 'submitting'].includes(view.state) || refreshingWallet;
+  const claimBusy = ['scanning', 'preparing', 'awaiting-signature', 'submitting'].includes(view.state) || refreshingWallet;
   const eligibleCount = view.discovery?.eligibleAccounts.length ?? 0;
   const nonemptyCount = nonemptySkippedAccountCount(view.discovery);
   const approvals = view.claim?.batches.length ?? 0;
   const displayedRecoverable = view.state === 'empty' || view.state === 'confirmed' ? '0' : view.claim?.grossRecoveredLamports;
   const transactionSignatures = view.signatures?.length ? view.signatures : lastConfirmedSignatures;
-  const claimButton = !connected ? 'CONNECT WALLET' : view.state === 'scanning' ? 'SCANNING WALLET…' : view.state === 'review' ? `CLAIM SOL${approvals > 1 ? ` · ${approvals} APPROVALS` : ''}` : view.state === 'awaiting-signature' ? 'APPROVE IN WALLET' : view.state === 'submitting' ? `CONFIRMING ON ${appNetworkLabel}…` : view.state === 'pending' ? 'CHECK CLAIM STATUS' : refreshingWallet ? 'REFRESHING WALLET…' : view.state === 'confirmed' ? 'CLAIM COMPLETE' : view.state === 'empty' ? 'NO SOL TO CLAIM' : 'SCAN AGAIN';
+  const claimButton = !connected ? 'CONNECT WALLET' : view.state === 'scanning' ? 'SCANNING ACCOUNTS…' : view.state === 'review' ? `CLAIM SOL${approvals > 1 ? ` · ${approvals} APPROVALS` : ''}` : view.state === 'preparing' ? 'PREPARING…' : view.state === 'awaiting-signature' ? 'APPROVE IN WALLET' : view.state === 'submitting' ? `SUBMITTING / CONFIRMING ON ${appNetworkLabel}…` : view.state === 'pending' ? 'CHECK CLAIM STATUS' : refreshingWallet ? 'REFRESHING WALLET…' : view.state === 'confirmed' ? 'CLAIM COMPLETE' : view.state === 'empty' ? 'NO SOL TO CLAIM' : 'SCAN AGAIN';
 
   return <div className="feature-body claim-body">
     {confettiCount > 0 && <div className="swap-confetti" aria-hidden="true">{Array.from({ length: confettiCount }, (_, index) => <i key={index} style={particleStyle(index)} />)}</div>}
@@ -214,12 +224,12 @@ export function ClaimConsole({ connected, onConnect }: { connected: boolean; onC
       <div className="summary-line"><span>RECOVERABLE SOL</span><strong>{formatLamports(displayedRecoverable)}</strong></div>
       <GaslessStatus connected={connected} />
       <div className="receive-line"><span>YOU RECEIVE</span><strong>{formatLamports(view.state === 'empty' || view.state === 'confirmed' ? '0' : view.claim?.netUserLamports)}</strong></div>
-      <button className="console-primary" type="button" onClick={!connected ? onConnect : view.state === 'review' ? () => void submitClaim() : () => void scan()} disabled={claimBusy || view.state === 'confirmed' || view.state === 'empty'}>{claimButton}</button>
+      <button className="console-primary" type="button" aria-busy={claimBusy} onClick={!connected ? onConnect : view.state === 'review' ? () => void submitClaim() : () => void scan()} disabled={claimBusy || view.state === 'confirmed' || view.state === 'empty'}>{claimButton}</button>
       {view.state === 'empty' && <button className="claim-rescan" type="button" onClick={() => void scan()}>SCAN AGAIN</button>}
       {view.error && <p className="connection-message" role="alert">{view.error}</p>}
       {nonemptyCount > 0 && <p>{nonemptyCount} token account{nonemptyCount === 1 ? " isn't" : "s aren't"} empty and will remain untouched.</p>}
       {transactionSignatures.map((signature, index) => <a key={signature} href={explorerTransactionUrl(signature)} target="_blank" rel="noreferrer">VIEW TRANSACTION{transactionSignatures.length > 1 ? ` ${index + 1}` : ''}</a>)}
-      <DetailSection><DetailRow label="Accounts selected" value={view.claim ? String(eligibleCount) : view.state === 'empty' ? '0' : '—'} /><DetailRow label="Wallet SOL balance" value={formatLamports(view.discovery?.walletBalanceLamports)} /><DetailRow label="Gross SOL recovered" value={formatLamports(view.claim?.grossRecoveredLamports)} /><DetailRow label="GASLESS service fee (3%)" value={formatLamports(view.claim?.gaslessFeeLamports)} /><DetailRow label="Sponsored network cost" value={formatLamports(view.claim?.sponsoredCostLamports)} /><DetailRow label="Final SOL received" value={formatLamports(view.claim?.netUserLamports)} /><p>{view.claim ? `${approvals} transaction${approvals === 1 ? '' : 's'} prepared. The account closures and disclosed costs settle atomically in each transaction.` : 'Eligible accounts, exact costs, and the final amount appear here before you sign.'}</p></DetailSection>
+      <DetailSection><DetailRow label="Accounts selected" value={view.claim ? String(eligibleCount) : view.state === 'empty' ? '0' : '—'} /><DetailRow label="Wallet SOL balance" value={formatLamports(view.discovery?.walletBalanceLamports)} /><DetailRow label="Recoverable rent" value={formatLamports(view.claim?.grossRecoveredLamports)} /><DetailRow label="GASLESS service fee (3%)" value={formatLamports(view.claim?.gaslessFeeLamports)} /><DetailRow label="Network fee" value={view.claim ? 'Covered by GASLESS' : '—'} /><DetailRow label="Final SOL received" value={formatLamports(view.claim?.netUserLamports)} /><p>{view.claim ? `${approvals} transaction${approvals === 1 ? '' : 's'} prepared. The preview reserves the configured maximum network cost; the exact amount is recalculated before signing.` : 'Eligible accounts, exact costs, and the final amount appear here before you sign.'}</p></DetailSection>
     </div>}
 
     {mode === 'recover' && <RecoverConsole connected={connected} onConnect={onConnect} />}

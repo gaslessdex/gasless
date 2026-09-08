@@ -1,5 +1,6 @@
 import { GaslessError } from '../errors.js';
 import type { SolanaRpc } from '../solana/rpc.js';
+import { effectiveRawTokenUsdPriceMicros } from '../../chains/solana/token-2022/accounts.js';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -7,10 +8,14 @@ export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 export interface AuthoritativePrice { usdPriceMicros: string; observedAt: string }
 export interface PriceProvider {
   getUsdPrices(mints: string[]): Promise<Record<string, AuthoritativePrice>>;
-  assertExecutablePriceConfidence?(mint: string, decimals: number, prices: Record<string, AuthoritativePrice>): Promise<void>;
+  assertExecutablePriceConfidence?(mint: string, decimals: number, prices: Record<string, AuthoritativePrice>, uiMultiplier?: number): Promise<void>;
 }
 
-interface JupiterPrice { usdPrice?: unknown; blockId?: unknown }
+interface JupiterPrice {
+  usdPrice?: unknown;
+  blockId?: unknown;
+  stockData?: { price?: unknown; updatedAt?: unknown };
+}
 
 function usdMicros(value: unknown, roundUp: boolean) {
   const raw = typeof value === 'number' ? String(value) : typeof value === 'string' ? value : '';
@@ -43,37 +48,45 @@ export class JupiterPriceProvider implements PriceProvider {
     const current = this.now();
     const cached = unique.map((mint) => this.cache.get(mint));
     if (cached.every((price) => price && current - price.cachedAt <= this.refreshSeconds * 1000 && this.validAge(price.observedAt, current))) return this.pick(unique);
-    try {
-      if (!this.apiKey) throw new Error('missing api key');
-      const url = new URL(this.apiUrl); url.searchParams.set('ids', unique.join(','));
-      const response = await this.request(url, { headers: { 'x-api-key': this.apiKey }, signal: AbortSignal.timeout(7_000) });
-      const payload = await response.json() as Record<string, JupiterPrice>;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      for (const mint of unique) {
-        const price = payload[mint];
-        if (!price || !Number.isSafeInteger(price.blockId) || Number(price.blockId) < 0) throw new Error('missing or malformed price');
-        const blockTime = await this.rpc.getBlockTime(Number(price.blockId));
-        if (!Number.isSafeInteger(blockTime) || blockTime! < 0) throw new Error('price block time unavailable');
-        const observedAt = new Date(blockTime! * 1000).toISOString();
-        if (!this.validAge(observedAt, current)) throw new Error('stale or future price');
-        this.cache.set(mint, { usdPriceMicros: usdMicros(price.usdPrice, mint === WRAPPED_SOL_MINT), observedAt, cachedAt: current });
+    let failure: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (!this.apiKey) throw new Error('missing api key');
+        const url = new URL(this.apiUrl); url.searchParams.set('ids', unique.join(','));
+        const response = await this.request(url, { headers: { 'x-api-key': this.apiKey }, signal: AbortSignal.timeout(7_000) });
+        const payload = await response.json() as Record<string, JupiterPrice>;
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const observations = await Promise.all(unique.map(async (mint) => {
+          const price = payload[mint];
+          if (!price || !Number.isSafeInteger(price.blockId) || Number(price.blockId) < 0) throw new Error('missing or malformed price');
+          const blockTime = await this.rpc.getBlockTime(Number(price.blockId)).catch(() => null);
+          const blockObservedAt = Number.isSafeInteger(blockTime) && blockTime! >= 0 ? new Date(blockTime! * 1000).toISOString() : '';
+          if (this.validAge(blockObservedAt, current)) return [mint, { usdPriceMicros: usdMicros(price.usdPrice, mint === WRAPPED_SOL_MINT), observedAt: blockObservedAt, cachedAt: current }] as const;
+          const stockObservedAt = typeof price.stockData?.updatedAt === 'string' ? price.stockData.updatedAt : '';
+          if (mint === WRAPPED_SOL_MINT || !this.validAge(stockObservedAt, current)) throw new Error('stale or future price');
+          return [mint, { usdPriceMicros: usdMicros(price.stockData?.price, false), observedAt: stockObservedAt, cachedAt: current }] as const;
+        }));
+        for (const [mint, price] of observations) this.cache.set(mint, price);
+        return this.pick(unique);
+      } catch (error) {
+        failure = error;
+        if (attempt === 0 && this.apiKey) await new Promise((resolve) => setTimeout(resolve, 150));
       }
-      return this.pick(unique);
-    } catch (error) {
-      if (unique.every((mint) => { const price = this.cache.get(mint); return price && this.validAge(price.observedAt, current); })) return this.pick(unique);
-      throw new GaslessError('TOKEN_UNSUPPORTED', 'pricing', 'Current server pricing is unavailable.', true, undefined, { cause: error });
     }
+    if (unique.every((mint) => { const price = this.cache.get(mint); return price && this.validAge(price.observedAt, current); })) return this.pick(unique);
+    throw new GaslessError('TOKEN_UNSUPPORTED', 'pricing', 'Current server pricing is unavailable.', true, undefined, { cause: failure });
   }
 
-  async assertExecutablePriceConfidence(mint: string, decimals: number, prices: Record<string, AuthoritativePrice>) {
+  async assertExecutablePriceConfidence(mint: string, decimals: number, prices: Record<string, AuthoritativePrice>, uiMultiplier = 1) {
     try {
       if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18 || !Number.isInteger(this.maximumDeviationBps) || this.maximumDeviationBps < 1 || this.maximumDeviationBps > 2_000 || !Number.isInteger(this.maximumPriceImpactBps) || this.maximumPriceImpactBps < 0 || this.maximumPriceImpactBps > 1_000) throw new Error('invalid confidence policy');
       const tokenPrice = prices[mint]?.usdPriceMicros; const solPrice = prices[WRAPPED_SOL_MINT]?.usdPriceMicros;
       if (!tokenPrice || !solPrice) throw new Error('missing price');
       const current = this.now(); const cached = this.confidenceCache.get(mint);
       if (cached && cached.tokenPrice === tokenPrice && cached.solPrice === solPrice && current - cached.checkedAt <= this.refreshSeconds * 1000) return;
-      if (mint === USDC_MINT) this.assertDeviation(BigInt(tokenPrice), 1_000_000n);
-      else this.assertDeviation(BigInt(tokenPrice), await this.executableUsdPrice(mint, decimals, BigInt(tokenPrice)));
+      const executableReference = effectiveRawTokenUsdPriceMicros(BigInt(tokenPrice), uiMultiplier);
+      if (mint === USDC_MINT) this.assertDeviation(executableReference, 1_000_000n);
+      else this.assertDeviation(executableReference, await this.executableUsdPrice(mint, decimals, executableReference));
       this.assertDeviation(BigInt(solPrice), await this.executableUsdPrice(WRAPPED_SOL_MINT, 9, BigInt(solPrice)));
       this.confidenceCache.set(mint, { tokenPrice, solPrice, checkedAt: current });
     } catch (error) {

@@ -41,12 +41,14 @@ export async function confirmCleanSignature(rpc: SolanaRpc, signature: string, l
   return { signature, outcome: 'timeout_unknown' as const };
 }
 
-export async function recordCleanConfirmationObservation(input: { durable: DurableStore; eventPrefix: 'claim' | 'burn' | 'recover'; transactionId: string; signedMessageHash?: string; confirmation: CleanConfirmation }) {
+type SubmissionEventPrefix = 'claim' | 'burn' | 'recover' | 'send' | 'swap';
+
+export async function recordCleanConfirmationObservation(input: { durable: DurableStore; eventPrefix: SubmissionEventPrefix; transactionId: string; signedMessageHash?: string; confirmation: CleanConfirmation }) {
   const observedAt = input.confirmation.confirmedAt ?? new Date().toISOString();
   await input.durable.appendEvent(input.transactionId, `${input.eventPrefix}_confirmation_observed`, 'confirming', { transactionId: input.transactionId, canonicalSignature: input.confirmation.signature, provider: input.confirmation.provider, outcome: input.confirmation.outcome, slot: input.confirmation.slot, blockHeight: input.confirmation.blockHeight, observedAt, signedMessageHash: input.signedMessageHash }, `${input.transactionId}:confirmation:${input.confirmation.outcome}`);
 }
 
-export async function broadcastAndConfirmClean(input: { rpc: SolanaRpc; durable: DurableStore; eventPrefix: 'claim' | 'burn' | 'recover'; prepared: PreparedTransaction; fullySigned: string; canonicalSignature: string; signedMessageHash?: string }) {
+export async function broadcastAndConfirmClean(input: { rpc: SolanaRpc; durable: DurableStore; eventPrefix: SubmissionEventPrefix; prepared: PreparedTransaction; fullySigned: string; canonicalSignature: string; signedMessageHash?: string }) {
   const signedMessageHash = input.signedMessageHash ?? input.prepared.preparedMessageHash;
   for (let ordinal = 1; ordinal <= CLEAN_BROADCAST_MAX_ROUNDS; ordinal += 1) {
     const heights = await input.rpc.getBlockHeightsAcrossProviders();

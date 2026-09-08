@@ -1,23 +1,27 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { AddressLookupTableAccount, ComputeBudgetProgram, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
+import { AddressLookupTableAccount, ComputeBudgetProgram, PublicKey, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
+import { createTransferCheckedInstruction } from '@solana/spl-token';
 import type { PreparedTransaction, SimulationResult, SwapQuoteDetails, TransactionQuote, ValidatedTransaction } from '../../../shared/transactions/types.js';
 import { GaslessError } from '../../../server/errors.js';
-import { APPROVED_DEX_FAMILIES, COMPUTE_BUDGET_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, METEORA_DLMM_PROGRAM_ID, PUMPSWAP_PROGRAM_ID, RAYDIUM_CLMM_PROGRAM_ID, SYSTEM_PROGRAM_ID, approvedDexProgram, type JupiterBuild, jupiterInstruction, routeDexFamily } from '../../../server/jupiter/service.js';
+import { APPROVED_DEX_FAMILIES, COMPUTE_BUDGET_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, METEORA_DLMM_PROGRAM_ID, PUMPSWAP_PROGRAM_ID, RAYDIUM_CLMM_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, approvedDexProgram, type JupiterBuild, jupiterInstruction, routeDexFamily } from '../../../server/jupiter/service.js';
 import type { RpcInnerInstructionGroup, SolanaRpc } from '../../../server/solana/rpc.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID } from '../send/accounts.js';
 import { LEGACY_TOKEN_PROGRAM_ID } from '../claim/accounts.js';
 import { signingDeadlineIsActive } from '../swap/validity.js';
+import { tokenUiAmountToRaw } from '../token-2022/accounts.js';
 import { versionedMessageHash } from './clean.js';
 import { validatePhantomCompatibleTransaction } from './phantom.js';
 
 const MAX_COMPUTE_UNITS = 1_400_000;
 const MAX_SOLANA_TRANSACTION_BYTES = 1_232;
 
-export function parseTokenAmount(value: string, decimals: number) {
+export function parseTokenAmount(value: string, decimals: number, multiplier = 1) {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) throw new GaslessError('INVALID_REQUEST', 'swap_amount', 'Enter a valid amount greater than zero.');
   const [whole, fraction = ''] = value.split('.');
   if (fraction.length > decimals) throw new GaslessError('INVALID_REQUEST', 'swap_amount', `This token supports up to ${decimals} decimal places.`);
-  const raw = BigInt(whole) * 10n ** BigInt(decimals) + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals) || '0');
+  let raw: bigint;
+  try { raw = multiplier === 1 ? BigInt(whole) * 10n ** BigInt(decimals) + BigInt((fraction + '0'.repeat(decimals)).slice(0, decimals) || '0') : tokenUiAmountToRaw(value, decimals, multiplier); }
+  catch { throw new GaslessError('INVALID_REQUEST', 'swap_amount', 'Enter an amount greater than the smallest supported unit.'); }
   if (raw <= 0n) throw new GaslessError('INVALID_REQUEST', 'swap_amount', 'Enter an amount greater than zero.');
   return raw;
 }
@@ -33,19 +37,16 @@ export function calculateRoutedInput(totalInputRaw: bigint, serviceFeeRaw: bigin
   return routed;
 }
 
-function transferChecked(source: string, mint: string, destination: string, owner: string, amount: bigint, decimals: number) {
-  const data = Buffer.alloc(10); data[0] = 12; data.writeBigUInt64LE(amount, 1); data[9] = decimals;
-  return new TransactionInstruction({ programId: new PublicKey(LEGACY_TOKEN_PROGRAM_ID), keys: [
-    { pubkey: new PublicKey(source), isSigner: false, isWritable: true }, { pubkey: new PublicKey(mint), isSigner: false, isWritable: false },
-    { pubkey: new PublicKey(destination), isSigner: false, isWritable: true }, { pubkey: new PublicKey(owner), isSigner: true, isWritable: false },
-  ], data });
+function transferChecked(source: string, mint: string, destination: string, owner: string, amount: bigint, decimals: number, tokenProgram: string) {
+  if (tokenProgram !== LEGACY_TOKEN_PROGRAM_ID && tokenProgram !== TOKEN_2022_PROGRAM_ID) throw new GaslessError('TOKEN_UNSUPPORTED', 'swap_token_program', 'This token program is not supported for Swap.');
+  return createTransferCheckedInstruction(new PublicKey(source), new PublicKey(mint), new PublicKey(destination), new PublicKey(owner), amount, decimals, [], new PublicKey(tokenProgram));
 }
 
 function lookupTables(build: JupiterBuild) { return Object.entries(build.addressesByLookupTableAddress ?? {}).map(([key, addresses]) => new AddressLookupTableAccount({ key: new PublicKey(key), state: { deactivationSlot: BigInt('18446744073709551615'), lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, authority: undefined, addresses: addresses.map((address) => new PublicKey(address)) } })); }
 
 export const PUMP_FEE_PROGRAM_ID = 'pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ';
 export const MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
-export const SWAP_ALLOWED_PROGRAM_IDS = [SYSTEM_PROGRAM_ID, LEGACY_TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, RAYDIUM_CLMM_PROGRAM_ID, METEORA_DLMM_PROGRAM_ID, PUMPSWAP_PROGRAM_ID, PUMP_FEE_PROGRAM_ID, MEMO_PROGRAM_ID] as const;
+export const SWAP_ALLOWED_PROGRAM_IDS = [SYSTEM_PROGRAM_ID, LEGACY_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, RAYDIUM_CLMM_PROGRAM_ID, METEORA_DLMM_PROGRAM_ID, PUMPSWAP_PROGRAM_ID, PUMP_FEE_PROGRAM_ID, MEMO_PROGRAM_ID] as const;
 
 function resolvedKeys(transaction: VersionedTransaction, build: JupiterBuild) {
   const writable: string[] = []; const readonly: string[] = [];
@@ -61,8 +62,9 @@ function resolvedKeys(transaction: VersionedTransaction, build: JupiterBuild) {
 export function validateSwapProgramShape(transaction: VersionedTransaction, build: JupiterBuild, innerGroups: RpcInnerInstructionGroup[] | null | undefined, outputAtaExists: boolean, payer: string, wallet: string) {
   const keys = resolvedKeys(transaction, build); const allowed = new Set<string>(SWAP_ALLOWED_PROGRAM_IDS); const outerPrograms = transaction.message.compiledInstructions.map((instruction) => keys[instruction.programIdIndex]);
   const family = routeDexFamily(build); const expectedDexProgram = approvedDexProgram(family); const dexPrograms = new Set<string>(APPROVED_DEX_FAMILIES.map(approvedDexProgram));
-  const allowedOuter = new Set([COMPUTE_BUDGET_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, LEGACY_TOKEN_PROGRAM_ID]);
-  if (outerPrograms.some((program) => !program || !allowedOuter.has(program)) || outerPrograms.filter((program) => program === JUPITER_SWAP_PROGRAM_ID).length !== 1 || outerPrograms.filter((program) => program === LEGACY_TOKEN_PROGRAM_ID).length !== 2 || outerPrograms.filter((program) => program === ASSOCIATED_TOKEN_PROGRAM_ID).length !== (outputAtaExists ? 0 : 1)) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_program_validation', 'The swap transaction contains an unsupported outer instruction.');
+  const allowedOuter = new Set([COMPUTE_BUDGET_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, JUPITER_SWAP_PROGRAM_ID, LEGACY_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]);
+  const settlementTransfers = outerPrograms.filter((program) => program === LEGACY_TOKEN_PROGRAM_ID || program === TOKEN_2022_PROGRAM_ID);
+  if (outerPrograms.some((program) => !program || !allowedOuter.has(program)) || outerPrograms.filter((program) => program === JUPITER_SWAP_PROGRAM_ID).length !== 1 || settlementTransfers.length !== 2 || new Set(settlementTransfers).size !== 1 || outerPrograms.filter((program) => program === ASSOCIATED_TOKEN_PROGRAM_ID).length !== (outputAtaExists ? 0 : 1)) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_program_validation', 'The swap transaction contains an unsupported outer instruction.');
   const signerCount = transaction.message.header.numRequiredSignatures; const signers = transaction.message.staticAccountKeys.slice(0, signerCount).map(String);
   if (signerCount !== 2 || signers[0] !== payer || signers[1] !== wallet) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_program_validation', 'The swap transaction requested an unexpected signer.');
   if (!innerGroups?.length) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_program_validation', 'The swap CPI programs could not be proven.');
@@ -86,7 +88,7 @@ export function validateSwapProgramShape(transaction: VersionedTransaction, buil
 export function buildSwapTransaction(input: { swap: SwapQuoteDetails; build: JupiterBuild; walletAddress: string; feePayer: string; computeUnitLimit?: number }) {
   const suppliedCompute = input.build.computeBudgetInstructions.filter((instruction) => Buffer.from(instruction.data, 'base64')[0] !== 2).map(jupiterInstruction);
   const outputSetup = input.build.setupInstructions.filter((instruction) => instruction.accounts[1]?.pubkey === input.swap.outputAccount);
-  const instructions = [ComputeBudgetProgram.setComputeUnitLimit({ units: input.computeUnitLimit ?? MAX_COMPUTE_UNITS }), ...suppliedCompute, ...(!input.swap.outputAtaExists ? outputSetup.map(jupiterInstruction) : []), jupiterInstruction(input.build.swapInstruction), transferChecked(input.swap.inputToken.sourceAccount, input.swap.inputToken.mint, input.swap.reimbursementDestination, input.walletAddress, BigInt(input.swap.sponsorReimbursementRaw), input.swap.inputToken.decimals), transferChecked(input.swap.inputToken.sourceAccount, input.swap.inputToken.mint, input.swap.serviceFeeDestination, input.walletAddress, BigInt(input.swap.serviceFeeRaw), input.swap.inputToken.decimals)];
+  const instructions = [ComputeBudgetProgram.setComputeUnitLimit({ units: input.computeUnitLimit ?? MAX_COMPUTE_UNITS }), ...suppliedCompute, ...(!input.swap.outputAtaExists ? outputSetup.map(jupiterInstruction) : []), jupiterInstruction(input.build.swapInstruction), transferChecked(input.swap.inputToken.sourceAccount, input.swap.inputToken.mint, input.swap.reimbursementDestination, input.walletAddress, BigInt(input.swap.sponsorReimbursementRaw), input.swap.inputToken.decimals, input.swap.inputToken.tokenProgram), transferChecked(input.swap.inputToken.sourceAccount, input.swap.inputToken.mint, input.swap.serviceFeeDestination, input.walletAddress, BigInt(input.swap.serviceFeeRaw), input.swap.inputToken.decimals, input.swap.inputToken.tokenProgram)];
   const recentBlockhash = new PublicKey(Uint8Array.from(input.build.blockhashWithMetadata.blockhash)).toBase58();
   const message = new TransactionMessage({ payerKey: new PublicKey(input.feePayer), recentBlockhash, instructions }).compileToV0Message(lookupTables(input.build));
   const transaction = new VersionedTransaction(message);

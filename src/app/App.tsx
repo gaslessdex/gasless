@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import { LoadingSequence } from '../components/feedback/LoadingSequence';
 import { SkyLayer } from '../components/ui/racing/SkyLayer';
@@ -6,11 +6,11 @@ import { CarRig } from '../components/ui/racing/CarRig';
 import { TopHud, type HudPanel } from '../components/ui/TopHud';
 import { FeatureConsole } from '../components/ui/FeatureConsole';
 import { FaqConsole } from '../components/ui/FaqConsole';
-import { MobileActionRail } from '../components/ui/MobileActionRail';
 import { MobileMenu } from '../components/navigation/MobileMenu';
 import type { Feature } from '../types/app';
 import { DevnetProofPanel } from '../features/devnet-proof/DevnetProofPanel';
 import { appNetwork } from '../config/network';
+import { DEFAULT_PRODUCT_NETWORK, productNetwork, type ProductNetworkId } from '../config/productNetworks';
 
 const RacingScene = lazy(() => import('../components/ui/racing/RacingScene').then((module) => ({ default: module.RacingScene })));
 
@@ -38,6 +38,7 @@ export function App() {
   const [consoleClosing, setConsoleClosing] = useState(false);
   const [faqOpen, setFaqOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [selectedNetworkId, setSelectedNetworkId] = useState<ProductNetworkId>(DEFAULT_PRODUCT_NETWORK.id);
   const actionTrigger = useRef<HTMLButtonElement | null>(null);
   const actionTriggerId = useRef<Feature | null>(null);
   const app = useRef<HTMLElement>(null);
@@ -47,6 +48,19 @@ export function App() {
   const reducedMotion = useMemo(() => matchMedia('(prefers-reduced-motion: reduce)').matches, []);
   const [steeringEnabled, setSteeringEnabled] = useState(() => matchMedia('(hover: hover) and (pointer: fine)').matches);
   const webgl = useMemo(supportsWebGL, []);
+  const selectedNetwork = productNetwork(selectedNetworkId);
+
+  const resetSteering = useCallback(() => {
+    targetSteering.current = 0;
+    steeringVelocity.current = 0;
+    steering.current = 0;
+    const root = app.current?.style;
+    root?.setProperty('--steer', '0');
+    root?.setProperty('--vanishing-offset', '0px');
+    root?.setProperty('--far-offset', '0px');
+    root?.setProperty('--mid-offset', '0px');
+    root?.setProperty('--near-offset', '0px');
+  }, []);
 
   useEffect(() => {
     const query = matchMedia('(hover: hover) and (pointer: fine)');
@@ -79,16 +93,21 @@ export function App() {
     return () => cancelAnimationFrame(frame);
   }, [reducedMotion]);
 
-  useEffect(() => {
-    if (panel || feature || faqOpen || menuOpen) targetSteering.current = 0;
-  }, [panel, feature, faqOpen, menuOpen]);
+  useLayoutEffect(() => {
+    if (panel || feature || faqOpen || menuOpen) resetSteering();
+  }, [panel, feature, faqOpen, menuOpen, resetSteering]);
 
   const handlePointer = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (panel || feature || faqOpen || menuOpen || !steeringEnabled || event.pointerType !== 'mouse') return;
+    if (event.target instanceof Element && event.target.closest('.top-hud')) {
+      resetSteering();
+      return;
+    }
     targetSteering.current = pointerSteer(event.clientX);
-  }, [panel, feature, faqOpen, menuOpen, steeringEnabled]);
+  }, [panel, feature, faqOpen, menuOpen, resetSteering, steeringEnabled]);
 
   const openFeature = useCallback((nextFeature: Feature, trigger: HTMLButtonElement) => {
+    if (!selectedNetwork.actions.includes(nextFeature)) return;
     actionTrigger.current = trigger;
     actionTriggerId.current = nextFeature;
     setPanel(null);
@@ -97,13 +116,20 @@ export function App() {
     setFeature(nextFeature);
     setFaqOpen(false);
     setMenuOpen(false);
-  }, []);
+  }, [selectedNetwork.actions]);
 
   const openFaq = useCallback(() => {
     setPanel(null);
     setFeature(null);
     setMenuOpen(false);
     setFaqOpen(true);
+  }, []);
+
+  const openMenu = useCallback(() => {
+    setPanel(null);
+    setFeature(null);
+    setFaqOpen(false);
+    setMenuOpen(true);
   }, []);
 
   const closeFeature = useCallback(() => {
@@ -133,13 +159,12 @@ export function App() {
         ) : <div className="scene-fallback"><div className="fallback-road" /></div>}
       </div>
 
-      <CarRig theme={theme} activeAction={hoveredAction} consoleOpen={Boolean(feature || faqOpen || menuOpen)} onActionHover={setHoveredAction} onActionSelect={openFeature} onFaqSelect={openFaq} onMobileMenu={() => setMenuOpen(true)} />
-      <MobileActionRail onSelect={openFeature} />
+      <CarRig theme={theme} actions={selectedNetwork.actions} activeAction={hoveredAction} consoleOpen={Boolean(feature || faqOpen || menuOpen)} onActionHover={setHoveredAction} onActionSelect={openFeature} onFaqSelect={openFaq} onMobileMenu={openMenu} />
       </div>
-      <TopHud theme={theme} onThemeChange={setTheme} panel={panel} onPanelChange={(next) => { setMenuOpen(false); setFaqOpen(false); setPanel(next); }} />
-      {feature && <FeatureConsole feature={feature} closing={consoleClosing} onClose={closeFeature} />}
+      <TopHud theme={theme} onThemeChange={setTheme} panel={panel} menuOpen={menuOpen} selectedNetwork={selectedNetwork} interactionLocked={Boolean(feature || faqOpen || menuOpen)} onMenuOpen={openMenu} onNetworkSelect={(id) => { setSelectedNetworkId(id); setFeature(null); setHoveredAction(null); setPanel(null); }} onPanelChange={(next) => { if (feature || faqOpen || menuOpen) return; setPanel(next); }} />
+      {feature && <FeatureConsole feature={feature} network={selectedNetwork} closing={consoleClosing} onClose={closeFeature} />}
       {faqOpen && <FaqConsole onClose={() => setFaqOpen(false)} />}
-      {menuOpen && <MobileMenu theme={theme} onClose={() => setMenuOpen(false)} onPanelSelect={(next) => { setMenuOpen(false); setPanel(next); }} onFaqSelect={openFaq} />}
+      {menuOpen && <MobileMenu theme={theme} onThemeChange={setTheme} onClose={() => setMenuOpen(false)} onPanelSelect={(next) => { setMenuOpen(false); setPanel(next); }} onFaqSelect={openFaq} />}
       {!booted && <LoadingSequence onComplete={() => setBooted(true)} reducedMotion={reducedMotion} />}
       {import.meta.env.DEV && appNetwork === 'devnet' && new URLSearchParams(window.location.search).has('proof') && <DevnetProofPanel />}
       <div className="screen-grain" aria-hidden="true" />

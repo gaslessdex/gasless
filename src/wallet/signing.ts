@@ -41,6 +41,7 @@ export type SafeMutationDifference = {
 
 export type WalletMutationDiagnostics = {
   schemaVersion: 'wallet-mutation-v1';
+  compatibilityReason?: string;
   prepared: SafeTransactionStructure;
   returned: SafeTransactionStructure;
   differences: SafeMutationDifference[];
@@ -133,6 +134,9 @@ export async function assertSupportedWalletSignedTransaction(prepared: Uint8Arra
     diagnostics = await inspectWalletMutation(prepared, signed);
   } catch { throw new Error('The wallet returned an invalid Solana transaction.'); }
   const compatibility = validatePhantomCompatibleTransaction(preparedTransaction, signedTransaction);
-  if (!compatibility.accepted) throw new WalletMessageMismatchError(diagnostics);
+  if (!compatibility.accepted) {
+    diagnostics.compatibilityReason = compatibility.reason;
+    throw new WalletMessageMismatchError(diagnostics);
+  }
   return signed;
 }

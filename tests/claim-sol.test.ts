@@ -194,17 +194,20 @@ test('Claim pre-wallet gate releases an unsafe or state-changed preparation', as
   const changed = engineFixture(); const changedQuote = await changed.engine.createQuote({ walletAddress: changed.wallet.publicKey.toBase58(), network: 'devnet', clientRequestId: 'changed-gate', requestId: 'changed-gate' }); await changed.engine.prepare(changedQuote.quoteId, changed.wallet.publicKey.toBase58(), 'changed-gate-prepare'); changed.rpc.account.lamports += 1; await expectCode(() => changed.engine.currentWalletGateBlockHeight(changedQuote.quoteId, changed.wallet.publicKey.toBase58()), 'MESSAGE_MISMATCH'); assert.equal(changed.releaseAttempts.length, 1);
 });
 
-test('Claim rejects Compute Budget mutations, duplicates, reorder, and a prefilled payer signature', async () => {
+test('Claim rejects Compute Budget value changes, duplicates, and a prefilled payer signature while accepting safe Phantom reorder', async () => {
   const fixture = engineFixture(); const quote = await fixture.engine.createQuote({ walletAddress: fixture.wallet.publicKey.toBase58(), network: 'devnet', clientRequestId: 'compute', requestId: 'compute' }); const prepared = await fixture.engine.prepare(quote.quoteId, fixture.wallet.publicKey.toBase58(), 'compute-prepare'); const canonical = prepared.claim!.batches[0].prepared!;
-  for (const mutation of ['price', 'limit', 'reorder', 'duplicate'] as const) {
+  for (const mutation of ['price', 'limit', 'duplicate'] as const) {
     const transaction = VersionedTransaction.deserialize(Buffer.from(canonical.serializedTransaction, 'base64'));
     if (mutation === 'price') transaction.message.compiledInstructions[0].data[1] ^= 1;
     if (mutation === 'limit') transaction.message.compiledInstructions[1].data[1] ^= 1;
-    if (mutation === 'reorder') [transaction.message.compiledInstructions[0], transaction.message.compiledInstructions[1]] = [transaction.message.compiledInstructions[1], transaction.message.compiledInstructions[0]];
     if (mutation === 'duplicate') transaction.message.compiledInstructions.splice(2, 0, { ...transaction.message.compiledInstructions[0], data: Uint8Array.from(transaction.message.compiledInstructions[0].data), accountKeyIndexes: [...transaction.message.compiledInstructions[0].accountKeyIndexes] });
     transaction.sign([fixture.wallet]);
     await expectCode(() => validateSignedClaim(Buffer.from(transaction.serialize()).toString('base64'), canonical, fixture.rpc as unknown as SolanaRpc), 'MESSAGE_MISMATCH');
   }
+  const reordered = VersionedTransaction.deserialize(Buffer.from(canonical.serializedTransaction, 'base64'));
+  [reordered.message.compiledInstructions[0], reordered.message.compiledInstructions[1]] = [reordered.message.compiledInstructions[1], reordered.message.compiledInstructions[0]];
+  reordered.sign([fixture.wallet]);
+  assert.equal((await validateSignedClaim(Buffer.from(reordered.serialize()).toString('base64'), canonical, fixture.rpc as unknown as SolanaRpc)).walletAddress, fixture.wallet.publicKey.toBase58());
   const payerSigned = VersionedTransaction.deserialize(Buffer.from(canonical.serializedTransaction, 'base64')); payerSigned.sign([fixture.wallet]); payerSigned.signatures[0] = Uint8Array.from({ length: 64 }, () => 1); await expectCode(() => validateSignedClaim(Buffer.from(payerSigned.serialize()).toString('base64'), canonical, fixture.rpc as unknown as SolanaRpc), 'USER_SIGNATURE_INVALID');
 });
 

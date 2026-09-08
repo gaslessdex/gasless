@@ -43,8 +43,9 @@ test('Burn uses one-shot shared confetti and a dismissible expiring transaction 
 
 test('Burn token selection remains explicit and unknown metadata has a safe shortened-mint fallback', () => {
   const source = readFileSync('src/features/clean/components/BurnConsole.tsx', 'utf8');
-  assert.match(source, /symbol: `TOKEN \$\{shortMint\(account\.mint\)\}`/);
-  assert.match(source, /name: 'Legacy SPL token'/);
+  assert.match(source, /getSolanaTokenMetadata\(account\.mint\)/);
+  assert.match(source, /symbol: metadata\?\.symbol \?\? `TOKEN \$\{shortMint\(account\.mint\)\}`/);
+  assert.match(source, /name: metadata\?\.name \?\? 'Legacy SPL token'/);
   assert.match(source, /value=\{selectedToken\}/);
   assert.match(source, /onChange=\{\(token\)/);
   assert.doesNotMatch(source, /eligibleAccounts\[0\]/);

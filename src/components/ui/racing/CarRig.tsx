@@ -1,7 +1,4 @@
 import type { CSSProperties } from 'react';
-import bodyLight from '../../../../assets/images/car/car-body-light.png';
-import bodyDark from '../../../../assets/images/car/car-body-dark.png';
-import wheel from '../../../../assets/images/car/car-wheel.png';
 import type { Theme } from '../../../types/app';
 import type { Feature } from '../../../types/app';
 import { SteeringWheel } from './CockpitAnchor';
@@ -30,8 +27,9 @@ function partStyle(part: CarPartLayout): CSSProperties {
   } as CSSProperties;
 }
 
-export function CarRig({ theme, activeAction, consoleOpen, onActionHover, onActionSelect, onFaqSelect, onMobileMenu }: {
+export function CarRig({ actions, activeAction, consoleOpen, onActionHover, onActionSelect, onFaqSelect, onMobileMenu }: {
   theme: Theme;
+  actions: readonly Feature[];
   activeAction: Feature | null;
   consoleOpen: boolean;
   onActionHover: (feature: Feature | null) => void;
@@ -51,16 +49,16 @@ export function CarRig({ theme, activeAction, consoleOpen, onActionHover, onActi
   } as CSSProperties;
 
   return (
-    <div className="car-rig" style={rigStyle} aria-label="Formula car cockpit">
+    <div className="car-rig" style={rigStyle} aria-label="GASLESS action controls">
       <div className="car-part car-wheel car-wheel--left" style={partStyle(CAR_LAYOUT.leftWheel)}>
-        <div className="wheel-clip"><div className="wheel-steer"><div className="wheel-roll"><img src={wheel} alt="" draggable={false} /></div></div></div>
+        <span className="public-rig-wheel" aria-hidden="true" />
       </div>
       <div className="car-part car-wheel car-wheel--right" style={partStyle(CAR_LAYOUT.rightWheel)}>
-        <div className="wheel-clip"><div className="wheel-steer"><div className="wheel-roll"><img src={wheel} alt="" draggable={false} /></div></div></div>
+        <span className="public-rig-wheel" aria-hidden="true" />
       </div>
-      <div className="car-part car-body" style={partStyle(CAR_LAYOUT.body)}><img src={theme === 'light' ? bodyLight : bodyDark} alt="" draggable={false} /></div>
+      <div className="car-part car-body" style={partStyle(CAR_LAYOUT.body)}><span className="public-rig-body" aria-hidden="true" /></div>
       <div className="car-part car-steering" style={partStyle(CAR_LAYOUT.steeringWheel)}>
-        <ActionHUD active={activeAction} disabled={consoleOpen} onHover={onActionHover} onSelect={onActionSelect} />
+        <ActionHUD actions={actions} active={activeAction} disabled={consoleOpen} onHover={onActionHover} onSelect={onActionSelect} />
         <SteeringWheel onFaqSelect={onFaqSelect} onMobileMenu={onMobileMenu} />
       </div>
     </div>

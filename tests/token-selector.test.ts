@@ -24,16 +24,18 @@ after(async () => {
 
 type Harness = { context: BrowserContext; page: Page };
 
-async function harness(options: { touch?: boolean; twoSelectors?: boolean } = {}): Promise<Harness> {
-  const context = await browser.newContext({ hasTouch: options.touch, isMobile: options.touch, viewport: { width: 480, height: 760 } });
+async function harness(options: { touch?: boolean; twoSelectors?: boolean; viewport?: { width: number; height: number }; theme?: 'light' | 'dark' } = {}): Promise<Harness> {
+  const context = await browser.newContext({ hasTouch: options.touch, isMobile: options.touch, colorScheme: options.theme, viewport: options.viewport ?? { width: 480, height: 760 } });
   const page = await context.newPage();
   page.on('pageerror', (error) => console.error(`token-selector page error: ${error.message}`));
-  await page.goto(baseUrl);
+  await page.goto(baseUrl, { timeout: 60_000 });
   await page.setContent('<main><button id="underlying" type="button">Underlying</button><div id="root"></div></main>');
+  await page.addStyleTag({ path: 'src/styles/global.css' });
   await page.addStyleTag({ content: '#underlying{position:absolute;inset:0}#root{position:relative;z-index:1}.token-picker-scrim{position:fixed;inset:0;z-index:2}.token-picker{background:white}' });
   await page.addScriptTag({ type: 'module', content: `
     import React from '/@id/react';
     import ReactDOMClient from '/@id/react-dom/client';
+    import '/src/styles/global.css';
     import { TokenSelector } from '/src/components/ui/TransactionControls.tsx';
     const initial = [
       { id: 'usdc', mint: 'USDCMint', program: 'TokenProgram', symbol: 'USDC', name: 'USD Coin', balance: '2.01', eligible: true },
@@ -173,4 +175,55 @@ test('one interaction cannot duplicate the modal or animation surface', async ()
   assert.equal(await h.page.locator('.token-picker-scrim').count(), 1);
   assert.equal(await h.page.locator('.token-picker').count(), 1);
   await h.context.close();
+});
+
+test('search matches name and exact mint text without case sensitivity', async () => {
+  const h = await harness();
+  await h.page.locator('.token-trigger').click();
+  const search = h.page.getByPlaceholder('Search by name, symbol, or mint address');
+  await search.fill('tEtHeR');
+  assert.equal(await h.page.getByRole('option').count(), 1);
+  assert.match(await h.page.getByRole('option').innerText(), /USDT/);
+  await search.fill('USDCMint');
+  assert.match(await h.page.getByRole('option').innerText(), /USDC/);
+  await h.context.close();
+});
+
+test('keyboard navigation moves from search to options and restores trigger focus', async () => {
+  const h = await harness();
+  const trigger = h.page.locator('.token-trigger');
+  await trigger.click();
+  const search = h.page.getByPlaceholder('Search by name, symbol, or mint address');
+  await search.press('ArrowDown');
+  assert.equal(await h.page.getByRole('option').first().evaluate((element) => element === document.activeElement), true);
+  await h.page.keyboard.press('ArrowDown');
+  assert.equal(await h.page.getByRole('option').nth(1).evaluate((element) => element === document.activeElement), true);
+  await h.page.keyboard.press('Escape');
+  assert.equal(await trigger.evaluate((element) => element === document.activeElement), true);
+  await h.context.close();
+});
+
+test('token images are lazy-loaded and use the local fallback', async () => {
+  const h = await harness();
+  await h.page.locator('.token-trigger').click();
+  const image = h.page.getByRole('option').first().locator('img');
+  assert.equal(await image.getAttribute('loading'), 'lazy');
+  assert.match(await image.getAttribute('src') ?? '', /favicon\.svg$/);
+  await h.context.close();
+});
+
+test('selector uses a centered desktop directory and a mobile bottom sheet in both themes', async () => {
+  for (const setup of [{ viewport: { width: 1280, height: 800 }, theme: 'dark' as const }, { viewport: { width: 390, height: 844 }, theme: 'light' as const, touch: true }]) {
+    const h = await harness(setup);
+    await h.page.locator('html').evaluate((node, theme) => node.setAttribute('data-theme', theme), setup.theme);
+    await h.page.locator('.token-trigger').click();
+    const geometry = await h.page.locator('.token-picker').evaluate((node) => { const bounds = node.getBoundingClientRect(); return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right, radius: getComputedStyle(node).borderTopLeftRadius, overflow: getComputedStyle(node).overflow }; });
+    assert.equal(geometry.overflow, 'hidden');
+    assert.ok(geometry.left >= 0 && geometry.right <= setup.viewport.width);
+    if (setup.touch) { assert.ok(Math.abs(geometry.bottom - setup.viewport.height) <= 1); assert.notEqual(geometry.radius, '0px'); }
+    else assert.ok(Math.abs((geometry.top + geometry.bottom) / 2 - setup.viewport.height / 2) <= 2);
+    assert.equal(await h.page.locator('select').count(), 0);
+    assert.equal(await h.page.getByRole('option').first().evaluate((node) => getComputedStyle(node).borderBottomWidth), '0px');
+    await h.context.close();
+  }
 });

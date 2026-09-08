@@ -16,22 +16,31 @@ const CENTER = 360;
 const INNER_RADIUS = 184;
 const OUTER_RADIUS = 316;
 
-const ACTIONS: ActionDefinition[] = [
-  { id: 'claim', label: 'CLEAN', accessibleLabel: 'Open Clean tools.', startAngle: 92, endAngle: 208, outwardX: -0.866, outwardY: 0.5 },
-  { id: 'swap', label: 'SWAP', accessibleLabel: 'Swap supported tokens without SOL.', startAngle: -148, endAngle: -32, outwardX: 0, outwardY: -1 },
-  { id: 'send', label: 'SEND', accessibleLabel: 'Send supported tokens without SOL.', startAngle: -28, endAngle: 88, outwardX: 0.866, outwardY: 0.5 },
-];
-
-const LABEL_PATHS: Record<Feature, string> = {
-  claim: 'M 150 482 A 270 270 0 0 1 92 250',
-  swap: 'M 155 190 A 270 270 0 0 1 565 190',
-  send: 'M 628 250 A 270 270 0 0 1 570 482',
+const ACTION_COPY: Record<Feature, Pick<ActionDefinition, 'label' | 'accessibleLabel'>> = {
+  claim: { label: 'CLEAN', accessibleLabel: 'Open Clean tools.' },
+  bridge: { label: 'BRIDGE', accessibleLabel: 'Preview Bridge.' },
+  swap: { label: 'SWAP', accessibleLabel: 'Open Swap.' },
+  send: { label: 'SEND', accessibleLabel: 'Open Send.' },
 };
+
+const ACTION_POSITIONS = [
+  { startAngle: 92, endAngle: 208, outwardX: -0.866, outwardY: 0.5 },
+  { startAngle: -148, endAngle: -32, outwardX: 0, outwardY: -1 },
+  { startAngle: -28, endAngle: 88, outwardX: 0.866, outwardY: 0.5 },
+] as const;
 
 function point(radius: number, angle: number) {
   const radians = angle * Math.PI / 180;
   return { x: CENTER + Math.cos(radians) * radius, y: CENTER + Math.sin(radians) * radius };
 }
+
+function labelPath(radius: number, startAngle: number, endAngle: number) {
+  const start = point(radius, startAngle);
+  const end = point(radius, endAngle);
+  return `M ${start.x} ${start.y} A ${radius} ${radius} 0 0 1 ${end.x} ${end.y}`;
+}
+
+const LABEL_PATHS = [labelPath(250, 150, 220), labelPath(250, -140, -40), labelPath(250, -40, 30)];
 
 function sectorPath(innerRadius: number, outerRadius: number, startAngle: number, endAngle: number) {
   const outerStart = point(outerRadius, startAngle);
@@ -41,14 +50,16 @@ function sectorPath(innerRadius: number, outerRadius: number, startAngle: number
   return `M ${outerStart.x} ${outerStart.y} A ${outerRadius} ${outerRadius} 0 0 1 ${outerEnd.x} ${outerEnd.y} L ${innerEnd.x} ${innerEnd.y} A ${innerRadius} ${innerRadius} 0 0 0 ${innerStart.x} ${innerStart.y} Z`;
 }
 
-export function ActionHUD({ active, disabled, onHover, onSelect }: {
+export function ActionHUD({ actions, active, disabled, onHover, onSelect }: {
+  actions: readonly Feature[];
   active: Feature | null;
   disabled?: boolean;
   onHover: (feature: Feature | null) => void;
   onSelect: (feature: Feature, trigger: HTMLButtonElement) => void;
 }) {
   const pressed = useRef<Feature | null>(null);
-  const buttons = useRef<Record<Feature, HTMLButtonElement | null>>({ claim: null, swap: null, send: null });
+  const buttons = useRef<Record<Feature, HTMLButtonElement | null>>({ claim: null, bridge: null, swap: null, send: null });
+  const actionDefinitions = actions.map((id, index) => ({ id, ...ACTION_COPY[id], ...ACTION_POSITIONS[index]! }));
 
   const activate = (action: ActionDefinition, trigger?: HTMLButtonElement | null) => {
     if (!disabled && trigger) onSelect(action.id, trigger);
@@ -57,14 +68,14 @@ export function ActionHUD({ active, disabled, onHover, onSelect }: {
   return (
     <section className="action-hud" aria-label="GASLESS actions">
       <svg viewBox="0 0 720 720" aria-hidden="true">
-        <defs>{ACTIONS.map((action) => <path key={action.id} id={`action-label-path-${action.id}`} d={LABEL_PATHS[action.id]} />)}</defs>
+        <defs>{actionDefinitions.map((action, index) => <path key={action.id} id={`action-label-path-${action.id}`} d={LABEL_PATHS[index]} />)}</defs>
         <circle className="action-dead-zone" cx={CENTER} cy={CENTER} r={INNER_RADIUS - 8} aria-hidden="true" />
-        {ACTIONS.map((action) => {
+        {actionDefinitions.map((action, index) => {
           const style = { '--out-x': action.outwardX, '--out-y': action.outwardY } as CSSProperties;
           return (
             <g
               key={action.id}
-              className={`action-segment action-${action.id}${active === action.id ? ' is-active' : ''}${active && active !== action.id ? ' is-muted' : ''}`}
+              className={`action-segment action-slot-${index + 1} action-${action.id}${active === action.id ? ' is-active' : ''}${active && active !== action.id ? ' is-muted' : ''}`}
               style={style}
               onPointerEnter={(event) => { if (event.pointerType === 'mouse') onHover(action.id); }}
               onPointerLeave={(event) => { if (event.pointerType === 'mouse') onHover(null); pressed.current = null; }}
@@ -81,11 +92,11 @@ export function ActionHUD({ active, disabled, onHover, onSelect }: {
           );
         })}
       </svg>
-      {ACTIONS.map((action) => <button
+      {actionDefinitions.map((action, index) => <button
         key={action.id}
         ref={(node) => { buttons.current[action.id] = node; }}
         id={`action-trigger-${action.id}`}
-        className={`action-keyboard-control action-keyboard-${action.id}${active === action.id ? ' is-active' : ''}`}
+        className={`action-keyboard-control action-keyboard-slot-${index + 1} action-keyboard-${action.id}${active === action.id ? ' is-active' : ''}`}
         type="button"
         disabled={disabled}
         aria-label={action.accessibleLabel}

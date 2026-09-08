@@ -2,12 +2,14 @@
 
 ## Claim SOL
 
-Closes safely eligible token accounts and returns stored SOL. A quote can batch a bounded number of eligible accounts while preserving one exact user authorization.
+Closes safely eligible empty token accounts and returns stored SOL. Discovery and quote creation share one authoritative scan, and preparation replaces the conservative network-cost bound with the current calculated fee.
 
 ## Recover Value
 
-Uses the complete balance of an exact approved legacy-SPL source, a fresh Jupiter build, and the proven Raydium-compatible route. It swaps to SOL, closes the source, handles the canonical temporary wrapped-SOL account when needed, deducts separately disclosed reimbursement and service fees, and returns the guaranteed net payout. Meteora and PumpSwap are not enabled for Recover Value.
+Uses the complete balance of an exact approved legacy-SPL source, a current Jupiter route, and a guaranteed minimum outcome. It swaps to SOL, closes the source, handles the canonical temporary wrapped-SOL account when needed, deducts separately disclosed reimbursement and service fees, and returns the net payout.
+
+Recover capability is independent from SEND and SWAP capability. xStock Recover and unverified Token-2022 Recover profiles are unsupported.
 
 ## Burn
 
-Uses full-balance `BurnChecked`, closes the emptied account, settles rent-based fees, and returns the remainder. It excludes NFTs, Token-2022, partial burns, wSOL, delegated sources, and unusual authorities in V1. The user receives an explicit irreversible warning.
+Uses full-balance `BurnChecked`, closes the emptied account, settles rent-based fees, and returns the remainder. It excludes NFTs, partial burns, wSOL, delegated sources, and unsupported Token-2022 or authority profiles. The user receives an explicit irreversible warning.

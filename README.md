@@ -1,41 +1,43 @@
 # GASLESS
 
-Clean, move, and use your assets without holding gas.
+Clean, move, swap, bridge, and use supported assets without first acquiring native gas.
 
-**SOLANA** — CLEAN · SWAP · SEND  
-**EVM** — BRIDGE · SWAP · SEND
+## Network status
 
-| Network | Actions | Status |
+| Network | Current role | Status |
 | --- | --- | --- |
-| Solana | CLEAN · SWAP · SEND | V1 / Implemented |
-| Robinhood Chain | BRIDGE · SWAP · SEND | Planned — First EVM Target |
-| Base | BRIDGE · SWAP · SEND | Planned |
-| BNB Chain | BRIDGE · SWAP · SEND | Planned |
-| Other EVM-compatible networks | BRIDGE · SWAP · SEND | Extensible |
+| Solana | CLEAN · SWAP · SEND and sponsored cross-chain origin | Active / implemented |
+| Robinhood Chain | Destination for supported Solana-origin routes | Active where a current route is available |
+| Base | Future execution target | Planned |
+| BNB Chain | Future execution target | Planned |
 
-## What GASLESS does
+Robinhood Chain destination support does not mean native Robinhood-origin BRIDGE, SWAP, or SEND execution is active.
 
-GASLESS lets an eligible wallet perform supported asset actions without first acquiring native gas. The server constructs the exact transaction, the user authorizes their asset action, and a restricted relayer sponsors the network cost. Sponsor reimbursement and any GASLESS service fee are disclosed separately before signing.
+## Product
 
-Solana V1 provides:
+On Solana, GASLESS provides:
 
-- **CLEAN:** Claim SOL from eligible accounts, Recover Value through an approved route, or permanently Burn supported fungible tokens.
-- **SWAP:** Jupiter-routed swaps restricted to individually approved Raydium CLMM, Meteora DLMM, or PumpSwap families.
-- **SEND:** exact recipient transfers with same-token sponsor reimbursement and safe canonical recipient-account creation when required.
+- **CLEAN:** Claim SOL from eligible empty token accounts, Burn supported fungible balances, or Recover Value through an approved route.
+- **SWAP:** Jupiter-routed swaps for action-approved assets and route families.
+- **SEND:** exact recipient transfers with same-token sponsor reimbursement and canonical recipient-account creation when required.
 
-## Security model
+For cross-chain execution, GASLESS obtains and validates a Relay route, sponsors eligible Solana origin costs, and tracks delivery to Robinhood Chain. SOL, USDC, and USDT are proven origin examples; ETH and USDG are current destination examples. Availability remains registry-, capability-, liquidity-, policy-, and route-dependent.
 
-The browser never chooses arbitrary instructions for sponsorship. GASLESS validates token identity by exact mint and token program, binds short-lived quotes to exact intent, verifies wallet-returned transaction semantics, rechecks current state, applies program and payer-outflow policy, simulates the final signed bytes, submits those same bytes, and reconciles the result. Unexpected instructions, route families, signers, account roles, or transaction mutations fail closed.
+## Architecture and security
 
-Solana V1 engineering and a controlled private-mainnet pilot are complete. Public sponsorship remains intentionally gated, token availability is operator-reviewed, and this repository does not claim unrestricted public-mainnet sponsorship.
+The browser never supplies arbitrary instructions for sponsorship. The backend resolves exact token identity and current state, builds or canonicalizes the action, validates routes and account roles, binds authorization to the exact message, applies replay and sponsorship controls, simulates, submits the authorized bytes, and reconciles the result. Kora is an independent payer and signing-policy boundary.
 
-Read [the architecture](docs/architecture.md), [security model](docs/security-model.md), and [transaction lifecycle](docs/transaction-lifecycle.md).
+This repository contains the GASLESS architecture and public-safe implementation. Proprietary visual assets, production configuration, operator tooling, and security-sensitive infrastructure are intentionally excluded; the public build uses a minimal neutral visual fallback.
 
-## Routing, fees, and tokens
+Read:
 
-Jupiter supplies composable Solana routes. GASLESS independently restricts and validates the selected underlying DEX family. Recover Value remains restricted to its proven Raydium-compatible path; Meteora and PumpSwap support applies to SWAP, not Recover Value.
-
-Fees vary by action and sponsor costs are separate from service fees. See [fees](docs/fees.md) and [token support](docs/token-support.md).
+- [Architecture](docs/architecture.md)
+- [Security model](docs/security-model.md)
+- [Token registry](docs/token-registry.md)
+- [Token support](docs/token-support.md)
+- [Cross-chain architecture](docs/cross-chain/overview.md)
+- [Fees](docs/fees.md)
+- [Transaction lifecycle](docs/transaction-lifecycle.md)
 
 ## Local development
 
@@ -47,7 +49,7 @@ npm ci
 npm run dev
 ```
 
-Run the backend separately when testing API flows:
+Run the API separately when testing server flows:
 
 ```bash
 npm run dev:api
@@ -59,12 +61,13 @@ Quality checks:
 npm run typecheck
 npm run lint
 npm test
+npm run test:ui
 npm run build
 ```
 
-Real credentials belong only in ignored local or deployment configuration. The example environment file contains no credentials.
+Real credentials belong only in ignored local or deployment configuration.
 
-## Project links
+## Links
 
 - Website: [gasless.exchange](https://gasless.exchange)
 - EVM foundation: [gaslessdex/gasless-evm](https://github.com/gaslessdex/gasless-evm)

@@ -1,7 +1,7 @@
 import { PublicKey, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { batchClaimAccounts, discoverClaimAccounts, inspectClaimAccount } from '../../chains/solana/claim/accounts.js';
-import { calculateClaimFee, prepareClaimTransaction, validateSignedClaim } from '../../chains/solana/transactions/claim.js';
+import { calculateClaimFee, calculateClaimNet, prepareClaimTransaction, validateSignedClaim } from '../../chains/solana/transactions/claim.js';
 import { versionedMessageHash, versionedSignerSignatureIsValid } from '../../chains/solana/transactions/clean.js';
 import type { ClaimBatch, ClaimDiscoveryResult, DurableTransactionRecord, ReconciliationResult, SolanaNetwork, TransactionIntent, TransactionQuote } from '../../shared/transactions/types.js';
 import type { EmergencyControlService } from '../controls/service.js';
@@ -15,6 +15,28 @@ import type { OperationalRiskService } from '../risk/operational.js';
 import { SWAP_MINIMUM_BLOCK_HEIGHT_MARGIN, signingDeadlineHasMargin } from '../../chains/solana/swap/validity.js';
 import { createSendSigningWindow, SEND_POST_SIGNATURE_BLOCK_MARGIN } from '../../chains/solana/send/validity.js';
 import { broadcastAndConfirmClean, confirmCleanSignature, observeCleanSignature, recordCleanConfirmationObservation } from '../clean/submission.js';
+
+const CLAIM_MUTATION_DIAGNOSTIC_KEYS = new Set([
+  'schemaVersion', 'compatibilityReason', 'prepared', 'returned', 'differences', 'messageSha256', 'messageLength', 'transactionVersion', 'recentBlockhash', 'requiredSignatureCount',
+  'staticAccountKeyCount', 'lookupTableCount', 'instructionCount', 'signerPublicKeys', 'signatureSlotsPopulated', 'instructions', 'index', 'programId', 'type',
+  'accountIndexes', 'accountCount', 'dataLength', 'units', 'microLamports', 'amount', 'decimals', 'kind', 'preparedIndex', 'returnedIndex', 'publicKeys',
+]);
+
+function sanitizeClaimMutationValue(value: unknown, depth = 0): unknown {
+  if (depth > 5) return undefined;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  if (typeof value === 'string') return value.slice(0, 128);
+  if (Array.isArray(value)) return value.slice(0, 64).map((item) => sanitizeClaimMutationValue(item, depth + 1)).filter((item) => item !== undefined);
+  if (!value || typeof value !== 'object') return undefined;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => CLAIM_MUTATION_DIAGNOSTIC_KEYS.has(key)).map(([key, item]) => [key, sanitizeClaimMutationValue(item, depth + 1)]).filter(([, item]) => item !== undefined));
+}
+
+function safeClaimMutationDiagnostics(value: unknown) {
+  if (!value || typeof value !== 'object' || (value as { schemaVersion?: unknown }).schemaVersion !== 'wallet-mutation-v1') return undefined;
+  const sanitized = sanitizeClaimMutationValue(value);
+  return sanitized && JSON.stringify(sanitized).length <= 32_000 ? sanitized : undefined;
+}
 
 interface ClaimPolicy {
   feeDestination?: string;
@@ -67,12 +89,12 @@ export class ClaimEngine {
     return { status: 'pending' as const, transactionId: record.id, signature: record.signature, blockHeight: confirmation.blockHeight, expired: record.lastValidBlockHeight !== undefined && confirmation.blockHeight !== undefined && confirmation.blockHeight > record.lastValidBlockHeight };
   }
 
-  async createQuote(input: { walletAddress: string; network: SolanaNetwork; clientRequestId: string; requestId: string }) {
+  async createQuote(input: { walletAddress: string; network: SolanaNetwork; clientRequestId: string; requestId: string }, currentDiscovery?: ClaimDiscoveryResult) {
     await this.controls.assertExecutionAllowed('CLEAN_CLAIM', input.network);
     if (!await this.temporary.consumeRateLimit(`claim-quote:${input.walletAddress}`, 10, 60)) throw new GaslessError('RATE_LIMITED', 'claim_quote', 'Too many Claim requests. Wait a minute and try again.', true);
     const requestLock = `claim-request:${input.walletAddress}:${input.clientRequestId}`;
     if (!await this.temporary.acquireReplayLock(requestLock, input.requestId, this.quoteTtlSeconds)) throw new GaslessError('REPLAY_DETECTED', 'claim_quote', 'This Claim request was already received.');
-    const discovery = await this.discover(input.walletAddress);
+    const discovery = currentDiscovery ?? await this.discover(input.walletAddress);
     if (!discovery.eligibleAccounts.length) throw new GaslessError('TOKEN_UNSUPPORTED', 'claim_quote', "There's no SOL available to claim right now.");
     this.assertPolicy();
     if (input.walletAddress === this.policy.feeDestination) throw new GaslessError('CONFIGURATION_ERROR', 'claim_configuration', 'The Claim fee destination cannot be the claiming wallet.');
@@ -82,13 +104,15 @@ export class ClaimEngine {
     const totalFee = calculateClaimFee(gross, this.policy.feeBps);
     let cumulativeGross = 0n;
     let allocatedFee = 0n;
+    const maximumNetworkFee = BigInt(this.policy.maximumNetworkFeeLamports);
     const batches: ClaimBatch[] = grouped.map((accounts, batchIndex) => {
       const batchGross = accounts.reduce((sum, account) => sum + BigInt(account.recoverableLamports), 0n);
       cumulativeGross += batchGross;
       const cumulativeFee = calculateClaimFee(cumulativeGross, this.policy.feeBps);
       const batchFee = cumulativeFee - allocatedFee;
       allocatedFee = cumulativeFee;
-      return { batchIndex, accounts, grossRecoveredLamports: batchGross.toString(), gaslessFeeLamports: batchFee.toString(), status: 'created' };
+      const batchNet = calculateClaimNet(batchGross, batchFee, maximumNetworkFee, BigInt(this.policy.minimumUserPayoutLamports));
+      return { batchIndex, accounts, grossRecoveredLamports: batchGross.toString(), gaslessFeeLamports: batchFee.toString(), sponsoredCostLamports: maximumNetworkFee.toString(), netUserLamports: batchNet.toString(), status: 'created' };
     });
     const now = Date.now();
     const intent: TransactionIntent = {
@@ -98,7 +122,7 @@ export class ClaimEngine {
     };
     const quote: TransactionQuote = {
       quoteId: crypto.randomUUID(), intent, status: 'created', createdAt: intent.createdAt, expiresAt: intent.expiresAt,
-      claim: { schemaVersion: 'claim-v1', feeBps: this.policy.feeBps, feeDestination: this.policy.feeDestination!, grossRecoveredLamports: gross.toString(), gaslessFeeLamports: totalFee.toString(), batches },
+      claim: { schemaVersion: 'claim-v1', feeBps: this.policy.feeBps, feeDestination: this.policy.feeDestination!, grossRecoveredLamports: gross.toString(), gaslessFeeLamports: totalFee.toString(), sponsoredCostLamports: (maximumNetworkFee * BigInt(batches.length)).toString(), netUserLamports: batches.reduce((sum, batch) => sum + BigInt(batch.netUserLamports!), 0n).toString(), batches },
     };
     await this.temporary.saveQuote(quote, this.quoteTtlSeconds);
     await this.durable.createIntent(intent, quote.quoteId);
@@ -199,18 +223,20 @@ export class ClaimEngine {
     const quote = await this.requireWalletQuote(quoteId, walletAddress); const prepared = quote.claim!.batches[0].prepared!;
     if (!new Set(['invoked', 'returned', 'failed', 'expired']).has(event)) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'Unknown wallet event.');
     const blockHeight = await this.rpc.getBlockHeight();
-    const safeMetadata = Object.fromEntries(Object.entries(metadata).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 240) : value]));
+    const safeMetadata = Object.fromEntries(Object.entries(metadata).filter(([key, value]) => key !== 'mutationDiagnostics' && ['string', 'number', 'boolean'].includes(typeof value)).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 240) : value]));
+    const mutationDiagnostics = safeClaimMutationDiagnostics(metadata.mutationDiagnostics);
     await this.durable.appendEvent(prepared.transactionId, `claim_wallet_${event}`, 'wallet_signing', { ...safeMetadata, blockHeight, remainingBlocks: prepared.lastValidBlockHeight - blockHeight }, `${prepared.transactionId}:wallet:${event}`);
+    if (mutationDiagnostics) await this.durable.appendEvent(prepared.transactionId, 'claim_wallet_mutation_diagnostics', 'wallet_post_sign_verification', { mutationDiagnostics }, `${prepared.transactionId}:wallet:mutation`);
   }
 
   async abortWalletApproval(quoteId: string, walletAddress: string, reason: string, userSignatureReturned: boolean) {
     const quote = await this.requireWalletQuote(quoteId, walletAddress, true); const prepared = quote.claim!.batches[0].prepared!;
     if (quote.status === 'failed') return { status: 'failed' as const };
-    const allowed = new Set(['USER_EXPLICITLY_CANCELLED', 'WALLET_SIGNING_TIMEOUT', 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN', 'WALLET_PROVIDER_ERROR', 'WALLET_ACCOUNT_CHANGED', 'APP_ABORTED_SIGNING_FLOW', 'SESSION_DISCONNECTED', 'UNKNOWN_WALLET_FAILURE']);
+    const allowed = new Set(['USER_EXPLICITLY_CANCELLED', 'WALLET_SIGNING_TIMEOUT', 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN', 'WALLET_PROVIDER_ERROR', 'POST_SIGN_VERIFICATION_FAILED', 'WALLET_ACCOUNT_CHANGED', 'APP_ABORTED_SIGNING_FLOW', 'SESSION_DISCONNECTED', 'UNKNOWN_WALLET_FAILURE']);
     if (!allowed.has(reason)) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'Unknown wallet failure.');
     const blockHeight = await this.rpc.getBlockHeight(); const remainingBlocks = prepared.lastValidBlockHeight - blockHeight;
     if (reason === 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN' && !userSignatureReturned && remainingBlocks >= 0) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The wallet attempt is not yet provably expired.');
-    if (userSignatureReturned && remainingBlocks >= SEND_POST_SIGNATURE_BLOCK_MARGIN) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The signed Claim still has a safe submission margin.');
+    if (reason === 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN' && userSignatureReturned && remainingBlocks >= SEND_POST_SIGNATURE_BLOCK_MARGIN) throw new GaslessError('INVALID_REQUEST', 'wallet_signing', 'The signed Claim still has a safe submission margin.');
     await this.failAfterWallet(quote, reason, userSignatureReturned, blockHeight);
     return { status: 'failed' as const };
   }

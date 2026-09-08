@@ -6,10 +6,10 @@ import { VersionedTransaction } from '@solana/web3.js';
 import { assertSupportedWalletSignedTransaction, WalletMessageMismatchError, type WalletMutationDiagnostics } from './signing.js';
 
 type SigningContext = { connectorName: string; phase: string };
-export type WalletSigningFailureClassification = 'USER_EXPLICITLY_CANCELLED' | 'WALLET_SIGNING_TIMEOUT' | 'WALLET_PROVIDER_ERROR' | 'APP_ABORTED_SIGNING_FLOW' | 'UNKNOWN_WALLET_FAILURE';
+export type WalletSigningFailureClassification = 'USER_EXPLICITLY_CANCELLED' | 'WALLET_SIGNING_TIMEOUT' | 'WALLET_PROVIDER_ERROR' | 'POST_SIGN_VERIFICATION_FAILED' | 'APP_ABORTED_SIGNING_FLOW' | 'UNKNOWN_WALLET_FAILURE';
 
 export class WalletSigningError extends Error {
-  constructor(public readonly classification: WalletSigningFailureClassification, public readonly providerCode: string, public readonly providerName: string, public readonly providerMessage: string, cause: unknown, public readonly mutationDiagnostics?: WalletMutationDiagnostics) {
+  constructor(public readonly classification: WalletSigningFailureClassification, public readonly providerCode: string, public readonly providerName: string, public readonly providerMessage: string, cause: unknown, public readonly mutationDiagnostics?: WalletMutationDiagnostics, public readonly userSignatureReturned = false) {
     super('Failed to sign transaction', { cause }); this.name = 'WalletSigningError';
   }
 }
@@ -77,14 +77,21 @@ export async function signWalletStandardTransaction({ wallet, account, transacti
   if (!feature.supportedTransactionVersions.includes(version)) throw new Error('The connected wallet does not support this Solana transaction version.');
   if (!wallet.chains.includes(chain) || !account.chains.includes(chain)) throw new Error('The connected wallet does not support the selected Solana network.');
 
+  let signed: Uint8Array;
   try {
     const outputs = await feature.signTransaction({ account, transaction, chain });
-    const signed = normalizeSignedTransaction(outputs[0]?.signedTransaction);
-    if (outputs.length !== 1 || !signed) throw new Error('The wallet returned an unsupported signed transaction format.');
-    return await assertSupportedWalletSignedTransaction(transaction, signed);
+    const normalized = normalizeSignedTransaction(outputs[0]?.signedTransaction);
+    if (outputs.length !== 1 || !normalized) throw new Error('The wallet returned an unsupported signed transaction format.');
+    signed = normalized;
   } catch (cause) {
     const details = reportSigningFailure(cause, { connectorName, phase: 'wallet_standard_sign_transaction' });
     throw new WalletSigningError(classifyWalletSigningFailure(cause), details.errorCode, details.causeName, details.causeMessage, cause, cause instanceof WalletMessageMismatchError ? cause.mutationDiagnostics : undefined);
+  }
+  try {
+    return await assertSupportedWalletSignedTransaction(transaction, signed);
+  } catch (cause) {
+    const details = reportSigningFailure(cause, { connectorName, phase: 'wallet_post_sign_verification' });
+    throw new WalletSigningError('POST_SIGN_VERIFICATION_FAILED', details.errorCode, details.causeName, details.causeMessage, cause, cause instanceof WalletMessageMismatchError ? cause.mutationDiagnostics : undefined, true);
   }
 }
 

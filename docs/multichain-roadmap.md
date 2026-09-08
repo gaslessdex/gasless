@@ -1,7 +1,16 @@
 # Multichain roadmap
 
-Solana V1 implements CLEAN · SWAP · SEND.
+## Active
 
-The shared EVM direction is BRIDGE · SWAP · SEND, with Robinhood Chain as the first implementation target, then Base and BNB Chain. Additional compatible networks should use one common execution core plus chain-specific configuration, policy, and adapters—not separate applications per network.
+- **Solana:** CLEAN, SWAP, SEND, and the sponsored origin side of supported cross-chain transactions.
+- **Robinhood Chain:** destination delivery for current Solana-origin Relay routes.
 
-The EVM work is currently an architectural foundation. No EVM bridge, swap, send, relayer, router, contract, chain ID, or production endpoint is represented as live. See [gaslessdex/gasless-evm](https://github.com/gaslessdex/gasless-evm).
+## Planned
+
+- Native Robinhood-origin GASLESS BRIDGE, SWAP, and SEND execution.
+- Base execution.
+- BNB Chain execution.
+
+Destination support and native-origin execution are separate milestones. The current repository does not present Robinhood Chain as a general native EVM execution environment and does not present Base or BNB as live.
+
+See [the cross-chain overview](cross-chain/overview.md) and the separate [EVM foundation](https://github.com/gaslessdex/gasless-evm).

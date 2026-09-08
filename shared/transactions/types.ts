@@ -6,7 +6,8 @@ export type TransactionAction =
   | 'CLEAN_RECOVER'
   | 'CLEAN_BURN'
   | 'SWAP'
-  | 'SEND';
+  | 'SEND'
+  | 'CROSS_CHAIN';
 
 export type TransactionStatus =
   | 'created'
@@ -107,10 +108,14 @@ export interface SwapDiscoveryResult {
 export interface SendToken {
   mint: string;
   symbol: string;
+  name?: string;
+  image?: string;
   decimals: number;
   tokenProgram: string;
   balanceRaw: string;
   sourceAccount: string;
+  uiMultiplier?: number;
+  tokenAccountSize?: number;
 }
 
 export interface SendQuoteDetails {
@@ -150,6 +155,8 @@ export interface SendDiscoveryResult {
 
 export interface RecoverAccount extends BurnAccount {
   symbol?: string;
+  name?: string;
+  image?: string;
 }
 
 export interface RecoverQuoteDetails {
@@ -158,6 +165,7 @@ export interface RecoverQuoteDetails {
   outputMint: string;
   slippageBps: number;
   routeLabel: string;
+  routeFamily?: 'Raydium CLMM' | 'Meteora DLMM' | 'Pump.fun Amm';
   routeFingerprint: string;
   wrappedSolState: { address: string; exists: boolean; lamports: string; amountRaw: string; stateFingerprint: string };
   estimatedSwapOutputLamports: string;
@@ -435,6 +443,14 @@ export interface DurableTransactionRecord {
   slippageBps?: number;
   priceImpactBps?: number;
   routeFingerprint?: string;
+  sourceAsset?: string;
+  destinationChainId?: number;
+  destinationAsset?: string;
+  crossChainRecipient?: string;
+  relayRequestId?: string;
+  relayOrderId?: string;
+  quoteExpiresAt?: string;
+  crossChainStatus?: string;
 }
 
 export interface SystemControls {
@@ -445,6 +461,7 @@ export interface SystemControls {
   cleanEnabled: boolean;
   swapEnabled: boolean;
   sendEnabled: boolean;
+  crossChainEnabled: boolean;
   proofEnabled: boolean;
   claimEnabled: boolean;
   recoverEnabled: boolean;

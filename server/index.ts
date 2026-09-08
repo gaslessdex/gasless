@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { createServices } from './app.js';
-import { assertExpectedKoraPayer, assertPrivateWalletRoles, loadServerConfig } from './config/env.js';
+import { assertExpectedKoraPayer, assertPrivateWalletRoles, isMainnetOperatingMode, loadServerConfig } from './config/env.js';
 import { GaslessError, asGaslessError, publicError } from './errors.js';
 import { log } from './observability/logger.js';
 import { captureOperationalFailure, initializeServerSentry } from './observability/sentry.js';
-import { assertCanonicalMainnetMints } from './token-registry/mainnet.js';
+import { assertCanonicalMainnetMints, mainnetMintValidationEntries } from './token-registry/mainnet.js';
 import { buildPublicStats } from './operator/public-data.js';
+import { browserVerificationCookie, browserVerificationSession } from './abuse/browser-verification.js';
 
 const config = loadServerConfig();
 initializeServerSentry(config.sentryDsn, config.operatingMode);
@@ -16,9 +17,8 @@ let startupValidation: Promise<void> | undefined;
 
 async function validateStartup() {
   await services.rpc.assertNetworkIdentity();
-  if (config.operatingMode === 'private-mainnet') {
-    const recoverEntries = config.recoverAllowedMints.map((mint) => ({ mint, symbol: mint, decimals: mint === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' || mint === 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' ? 6 : -1, tokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', extensions: [], status: 'supported' as const, enabledActions: ['CLEAN_RECOVER' as const] }));
-    await assertCanonicalMainnetMints(services.rpc, [...config.sendTokens, ...config.swapTokens, ...recoverEntries]);
+  if (isMainnetOperatingMode(config.operatingMode)) {
+    await assertCanonicalMainnetMints(services.rpc, mainnetMintValidationEntries([...config.sendTokens, ...config.swapTokens], config.recoverAllowedMints));
     if (!services.relayer.assertNetworkIdentity) throw new Error('Kora network verification is unavailable.');
     await services.relayer.assertNetworkIdentity(services.rpc);
     const payer = await services.relayer.getFeePayerPublicKey();
@@ -48,13 +48,35 @@ function send(response: ServerResponse, status: number, value: unknown, headers:
   response.end(JSON.stringify(value));
 }
 
+function verificationExempt(pathname: string) {
+  return pathname === '/api/health' || pathname.startsWith('/api/browser-verification/');
+}
+
+function requestClientKey(request: IncomingMessage) {
+  if (process.env.VERCEL) return String(request.headers['x-vercel-forwarded-for'] ?? request.socket.remoteAddress ?? 'unknown').split(',')[0]!.trim();
+  return request.socket.remoteAddress ?? 'local';
+}
+
 export const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
   const requestId = String(request.headers['x-request-id'] ?? crypto.randomUUID());
   try {
-    await (startupValidation ??= validateStartup());
     const url = new URL(request.url ?? '/', 'http://localhost');
     const routedPath = url.searchParams.get('__path');
     if (routedPath) url.pathname = `/api/${routedPath.replace(/^\/+/, '')}`;
+    const startupIndependent = url.pathname === '/api/health' || url.pathname.startsWith('/api/browser-verification/') || url.pathname === '/api/public/status' || url.pathname === '/api/public/stats';
+    if (!startupIndependent) await (startupValidation ??= validateStartup());
+    if (request.method === 'GET' && url.pathname === '/api/browser-verification/config') return send(response, 200, { enforced: services.browserVerification.enforced(), configured: services.browserVerification.configured(), siteKey: services.browserVerification.policy.siteKey, action: 'gasless-entry' });
+    if (request.method === 'POST' && url.pathname === '/api/browser-verification/verify') {
+      if (!await services.temporary.consumeRateLimit(`browser-challenge:${requestClientKey(request)}`, config.browserChallengeLimit, 300)) throw new GaslessError('RATE_LIMITED', 'browser_verification', "We couldn't verify this browser. Try again.", true);
+      const input = await body(request);
+      const verified = await services.browserVerification.verify(String(input.token ?? ''), String(request.headers['user-agent'] ?? ''), requestId);
+      return send(response, 200, { verified: true, expiresAt: verified.expiresAt }, { 'Set-Cookie': browserVerificationCookie(verified.sessionId, config.browserVerificationTtlSeconds, config.operatingMode !== 'devnet' || Boolean(process.env.VERCEL)) });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/browser-verification/status') {
+      await services.browserVerification.require(browserVerificationSession(request.headers.cookie), String(request.headers['user-agent'] ?? ''));
+      return send(response, 200, { verified: true, enforced: services.browserVerification.enforced() });
+    }
+    if (url.pathname.startsWith('/api/') && !verificationExempt(url.pathname)) await services.browserVerification.require(browserVerificationSession(request.headers.cookie), String(request.headers['user-agent'] ?? ''));
     if (request.method === 'GET' && url.pathname === '/api/public/status') {
       const controls = await services.durable.getControls();
       const tokens = [...new Map([...(await services.registry.list('SEND')), ...(await services.registry.list('SWAP'))].map((token) => [token.mint, token])).values()];
@@ -62,18 +84,17 @@ export const handleRequest = async (request: IncomingMessage, response: ServerRe
       return send(response, 200, { network: config.network, networkLabel: config.network === 'mainnet-beta' ? 'Solana Mainnet' : 'Solana Devnet', gaslessStatus: operational ? 'operational' : 'degraded', sponsorshipAvailable: controls.globalExecutionEnabled && controls.relayerEnabled && (config.network === 'mainnet-beta' ? controls.mainnetEnabled : controls.devnetEnabled), supportedTokenCount: tokens.length });
     }
     if (request.method === 'GET' && url.pathname === '/api/public/stats') {
-      const localPilot = !process.env.VERCEL;
-      if (!config.publicStatsEnabled && !localPilot) return send(response, 200, buildPublicStats(false, config.network));
-      const [metrics, tokens] = await Promise.all([services.durable.getOperatorMetrics(config.network), services.registry.list('SWAP')]);
-      return send(response, 200, buildPublicStats(true, config.network, metrics, tokens.length, localPilot && !config.publicStatsEnabled ? 'local-private-pilot' : 'public'));
+      const [metrics, swapTokens, sendTokens] = await Promise.all([services.durable.getOperatorMetrics(config.network), services.registry.list('SWAP'), services.registry.list('SEND')]);
+      const supportedTokenCount = new Set([...swapTokens, ...sendTokens].map((token) => token.mint)).size;
+      return send(response, 200, buildPublicStats(config.network, metrics, supportedTokenCount), { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=120' });
     }
     if (request.method === 'GET' && url.pathname === '/api/health') return send(response, 200, { ok: true, network: config.network, operatingMode: config.operatingMode });
     if (request.method === 'POST') {
-      const route = url.pathname.match(/^\/api\/(session|transactions|claim|burn|recover|send|swap)(?:\/(quote|prepare|pre-wallet|submit|discover))?$/);
+      const route = url.pathname.match(/^\/api\/(session|transactions|claim|burn|recover|send|swap|cross-chain)(?:\/(quote|prepare|pre-wallet|submit|discover|status|build))?$/);
       if (route) {
         const input = await body(request);
-        const action = route[1] === 'claim' ? 'CLEAN_CLAIM' : route[1] === 'burn' ? 'CLEAN_BURN' : route[1] === 'recover' ? 'CLEAN_RECOVER' : route[1] === 'send' ? 'SEND' : route[1] === 'swap' ? 'SWAP' : route[1] === 'transactions' ? 'DEVNET_PROOF' : 'SESSION';
-        const stage = route[1] === 'session' ? 'session' : (route[2] ?? 'quote') as 'discover' | 'quote' | 'prepare' | 'pre-wallet' | 'submit';
+        const action = route[1] === 'claim' ? 'CLEAN_CLAIM' : route[1] === 'burn' ? 'CLEAN_BURN' : route[1] === 'recover' ? 'CLEAN_RECOVER' : route[1] === 'send' ? 'SEND' : route[1] === 'swap' ? 'SWAP' : route[1] === 'cross-chain' ? 'CROSS_CHAIN' : route[1] === 'transactions' ? 'DEVNET_PROOF' : 'SESSION';
+        const stage = route[1] === 'session' ? 'session' : (route[2] ?? 'quote') as 'discover' | 'quote' | 'prepare' | 'pre-wallet' | 'submit' | 'status' | 'build';
         const clientAddress = String(request.headers['cf-connecting-ip'] ?? request.headers['x-forwarded-for'] ?? request.socket.remoteAddress ?? 'unknown').split(',')[0].trim();
         if (action === 'SESSION') await services.risk.enforceRequest(action, stage, String(input.walletAddress ?? ''), String(input.network ?? '') as typeof config.network, clientAddress);
         else {
@@ -109,6 +130,27 @@ export const handleRequest = async (request: IncomingMessage, response: ServerRe
       const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
       return send(response, 200, { ...await services.claim.discover(session.walletAddress), network: session.network });
     }
+    if (request.method === 'POST' && url.pathname === '/api/cross-chain/quote') {
+      const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
+      if (session.network !== 'mainnet-beta') throw new GaslessError('UNSUPPORTED_NETWORK', 'cross_chain', 'Cross-chain quotes are available from Solana Mainnet only.');
+      return send(response, 201, await services.crossChain.createQuote({ walletAddress: session.walletAddress, recipient: String(input.recipient ?? ''), inputAsset: input.inputAsset, outputAsset: input.outputAsset, amount: String(input.amount ?? '') }));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/cross-chain/status') {
+      const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
+      return send(response, 200, input.transactionId
+        ? await services.crossChain.transactionStatus(String(input.transactionId), session.walletAddress)
+        : await services.crossChain.status(String(input.quoteId ?? ''), session.walletAddress));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/cross-chain/build') {
+      const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
+      if (session.network !== 'mainnet-beta') throw new GaslessError('UNSUPPORTED_NETWORK', 'cross_chain_execution', 'Cross-chain execution is available from Solana Mainnet only.');
+      return send(response, 200, await services.crossChain.prepare(String(input.quoteId ?? ''), session.walletAddress));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/cross-chain/submit') {
+      const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
+      if (session.network !== 'mainnet-beta') throw new GaslessError('UNSUPPORTED_NETWORK', 'cross_chain_execution', 'Cross-chain execution is available from Solana Mainnet only.');
+      return send(response, 200, await services.crossChain.submit(String(input.transactionId ?? ''), session.walletAddress, String(input.signedTransaction ?? '')));
+    }
     if (request.method === 'POST' && url.pathname === '/api/claim/status') {
       const input = await body(request);
       const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
@@ -117,8 +159,14 @@ export const handleRequest = async (request: IncomingMessage, response: ServerRe
     if (request.method === 'POST' && url.pathname === '/api/claim/quote') {
       const input = await body(request);
       const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
-      const quote = await services.claim.createQuote({ walletAddress: session.walletAddress, network: session.network as 'devnet', clientRequestId: String(input.clientRequestId ?? ''), requestId });
-      return send(response, 201, { quoteId: quote.quoteId, status: quote.status, expiresAt: quote.expiresAt, claim: quote.claim });
+      const scanStartedAt = Date.now();
+      const discovery = await services.claim.discover(session.walletAddress);
+      const discoveryMs = Date.now() - scanStartedAt;
+      if (!discovery.eligibleAccounts.length) { log('info', 'claim_scan_completed', { requestId, discoveryMs, quoteMs: 0, accountCount: discovery.accounts.length, eligibleCount: 0 }); return send(response, 200, { discovery }); }
+      const quoteStartedAt = Date.now();
+      const quote = await services.claim.createQuote({ walletAddress: session.walletAddress, network: session.network as 'devnet', clientRequestId: String(input.clientRequestId ?? ''), requestId }, discovery);
+      log('info', 'claim_scan_completed', { requestId, discoveryMs, quoteMs: Date.now() - quoteStartedAt, accountCount: discovery.accounts.length, eligibleCount: discovery.eligibleAccounts.length });
+      return send(response, 201, { quoteId: quote.quoteId, status: quote.status, expiresAt: quote.expiresAt, discovery, claim: quote.claim });
     }
     if (request.method === 'POST' && url.pathname === '/api/claim/prepare') {
       const input = await body(request);
@@ -192,6 +240,10 @@ export const handleRequest = async (request: IncomingMessage, response: ServerRe
     if (request.method === 'POST' && url.pathname === '/api/send/discover') {
       const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
       return send(response, 200, await services.send.discover(session.walletAddress, session.network));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/send/status') {
+      const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));
+      return send(response, 200, await services.send.reconcileStatus(String(input.quoteId ?? ''), session.walletAddress, session.network));
     }
     if (request.method === 'POST' && url.pathname === '/api/send/quote') {
       const input = await body(request); const session = await services.session.require(String(input.sessionId ?? ''), String(input.walletAddress ?? ''));

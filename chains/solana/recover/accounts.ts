@@ -29,12 +29,11 @@ export async function discoverRecoverAccounts(rpc: SolanaRpc, registry: TokenReg
   const accounts: RecoverAccount[] = await Promise.all(discovered.accounts.map(async (account) => {
     if (!account.eligible) return { ...account, reason: account.reason?.replaceAll('Burn', 'Recover Value') };
     if (account.address !== recoverSourceAccount(walletAddress, account.mint)) return { ...account, eligible: false, reason: 'Recover Value V1 supports the wallet’s canonical token account only.' };
-    const [recover, swap] = await Promise.all([registry.evaluate('CLEAN_RECOVER', account.mint), registry.evaluate('SWAP', account.mint)]);
+    const recover = await registry.evaluate('CLEAN_RECOVER', account.mint);
     if (recover.decision !== 'supported') return { ...account, eligible: false, reason: 'This exact mint is not enabled for Recover Value.' };
-    if (swap.decision !== 'supported' || !swap.entry?.swapInputEnabled) return { ...account, eligible: false, reason: 'This exact mint is not enabled as a Recover Value swap input.' };
-    const token = recover.entry ?? swap.entry;
+    const token = recover.entry;
     if (!token || token.mint !== account.mint || token.tokenProgram !== account.tokenProgram || token.decimals !== account.decimals) return { ...account, eligible: false, reason: 'This token account does not match the exact Recover Value registry identity.' };
-    return { ...account, symbol: token.symbol };
+    return { ...account, symbol: token.symbol, name: token.name, image: token.image };
   }));
   return { walletAddress, network: 'devnet', scannedAt: new Date().toISOString(), accounts, eligibleAccounts: accounts.filter((account) => account.eligible), skippedAccounts: accounts.filter((account) => !account.eligible) };
 }

@@ -7,7 +7,7 @@ export const SEND_WALLET_BLOCK_POLL_MS = WALLET_BLOCK_POLL_MS;
 
 export type SendWalletApprovalOutcome =
   | { status: 'signed'; signedTransaction: Uint8Array; elapsedMs: number; blockHeight: number; remainingBlocks: number }
-  | { status: 'failed'; classification: WalletSigningFailureClassification; elapsedMs: number; error: unknown }
+  | { status: 'failed'; classification: WalletSigningFailureClassification; elapsedMs: number; error: unknown; userSignatureReturned: boolean }
   | { status: 'expired'; classification: 'TRANSACTION_EXPIRED_WHILE_WALLET_OPEN'; elapsedMs: number; blockHeight: number; remainingBlocks: number; userSignatureReturned: boolean };
 
 export { walletFailureClassification, walletReturnHasSubmissionMargin };

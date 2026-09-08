@@ -484,7 +484,7 @@ test('Swap cleanup remains intact and obsolete wallet diagnostics are removed', 
   const provider = readFileSync('src/wallet/WalletProvider.tsx', 'utf8');
   assert.doesNotMatch(swap, /<GaslessStatus/);
   assert.doesNotMatch(swap, /SLIPPAGE PROTECTION/);
-  assert.match(swap, /<DetailSection>[\s\S]*htmlFor="swap-slippage"/);
+  assert.match(swap, /<DetailSection>[\s\S]*id="swap-slippage"/);
   assert.doesNotMatch(provider, /wallet-debug|WalletDebugPanel|getWallets|standard:connect/);
   assert.match(provider, /useWalletConnectors/);
   assert.match(provider, /useConnectWallet/);

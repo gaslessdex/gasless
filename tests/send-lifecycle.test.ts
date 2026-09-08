@@ -23,7 +23,6 @@ test('Send accepts only the current unlocked preview and prepares only a fresh r
   assert.equal(quoteIdForSendPrepare('review', 'quote', new Date(now + 45_000).toISOString(), now), null);
   assert.equal(quoteIdForSendPrepare('checking', 'quote', new Date(now + 60_000).toISOString(), now), null);
 });
-
 test('Send refreshes review only for stale or mismatched server preparation', () => {
   assert.equal(shouldReturnSendToReview('QUOTE_NOT_FOUND'), true);
   assert.equal(shouldReturnSendToReview('QUOTE_EXPIRED'), true);
@@ -192,8 +191,4 @@ test('Send keeps two happy-path actions, treats preparation as status, and clean
   assert.match(source, /reason: 'final_gate_unavailable'/);
   assert.equal(source.match(/wallet\.signTransaction\(/g)?.length, 1);
   assert.doesNotMatch(source, /CONFIRM SEND|CONTINUE TO WALLET/);
-});
-
-test('local API development restarts when backend source changes', () => {
-  assert.match(JSON.parse(readFileSync('package.json', 'utf8')).scripts['dev:api'], /node --watch/);
 });

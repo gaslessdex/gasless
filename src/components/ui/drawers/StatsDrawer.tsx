@@ -1,26 +1,52 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { formatPublicNetworkFee, selectPublicNetworkStats, type PublicStatsResponse } from '../../../../shared/stats/public';
+import { PRODUCT_NETWORKS, productNetwork, type ProductNetworkId } from '../../../config/productNetworks';
+import { trapDrawerFocus } from './drawerFocus';
 
-interface PublicStats { visible: boolean; reason?: string; network?: string; scope?: 'public' | 'local-private-pilot'; totals?: { successfulActions: number; uniqueWallets: number; sponsoredLamports: string; supportedTokens: number; byAction: Record<string, number> } }
+export function StatsDrawer({ open, initialNetwork, onClose }: { open: boolean; initialNetwork: ProductNetworkId; onClose: () => void }) {
+  const drawer = useRef<HTMLElement>(null);
+  const [selectedNetwork, setSelectedNetwork] = useState<ProductNetworkId>(initialNetwork);
+  const [stats, setStats] = useState<PublicStatsResponse | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
 
-export function StatsDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [stats, setStats] = useState<PublicStats | null>(null);
-  useEffect(() => { if (open) fetch('/api/public/stats').then((response) => response.ok ? response.json() : Promise.reject()).then(setStats).catch(() => setStats(null)); }, [open]);
-  const actions = stats?.totals?.byAction ?? {};
+  useEffect(() => {
+    if (!open) return;
+    drawer.current?.focus({ preventScroll: true });
+    setSelectedNetwork(initialNetwork);
+    setStats(null);
+    setUnavailable(false);
+    fetch('/api/public/stats').then((response) => response.ok ? response.json() : Promise.reject()).then(setStats).catch(() => { setStats(null); setUnavailable(true); });
+  }, [open, initialNetwork]);
+
+  const network = productNetwork(selectedNetwork);
+  const selected = selectPublicNetworkStats(stats, selectedNetwork);
+  const loading = !stats && !unavailable;
+  const value = (content: string) => loading ? '—' : content;
+  const primaryActions = 'cleanActions' in selected.actions
+    ? ['CLEAN ACTIONS', selected.actions.cleanActions.toLocaleString()]
+    : ['BRIDGE ACTIONS', selected.actions.bridgeActions.toLocaleString()];
+  const metrics = [
+    ['TRANSACTIONS SPONSORED', selected.transactionsSponsored.toLocaleString()],
+    primaryActions,
+    ['SWAPS', selected.actions.swaps.toLocaleString()],
+    ['SENDS', selected.actions.sends.toLocaleString()],
+    ['CROSS-CHAIN ACTIONS', selected.actions.crossChainActions.toLocaleString()],
+    ['NETWORK FEES SPONSORED', formatPublicNetworkFee(selected.networkFeesSponsored)],
+    ['SUPPORTED TOKENS', selected.supportedTokens.toLocaleString()],
+  ] as const;
+
   return (
-    <aside id="stats-drawer" className={`hud-drawer hud-drawer--right${open ? ' is-open' : ''}`} aria-hidden={!open} aria-label="GASLESS statistics availability">
-      <div className="drawer-header"><div><span>02 / TELEMETRY</span><h2>GASLESS STATS</h2></div><button type="button" aria-label="Close stats drawer" onClick={onClose}>×</button></div>
-      {!stats ? <p className="drawer-intro">LIVE GASLESS STATISTICS ARE TEMPORARILY UNAVAILABLE.</p> : !stats.visible ? <p className="drawer-intro">VERIFIED PRIVATE-PILOT ACTIVITY IS HIDDEN UNTIL THE PUBLIC STATS SWITCH IS ENABLED.</p> : <>
-        <p className="drawer-intro">{stats.scope === 'local-private-pilot' ? 'REAL PRIVATE-PILOT RESULTS FROM RECONCILED MAINNET ACTIVITY.' : 'REAL, NETWORK-SCOPED COUNTS FROM RECONCILED GASLESS ACTIVITY.'}</p>
-        <dl className="stats-list">
-          <div><dt>SUCCESSFUL ACTIONS</dt><dd>{stats.totals?.successfulActions ?? 0}</dd></div>
-          <div><dt>SOL SPONSORED</dt><dd>{(Number(stats.totals?.sponsoredLamports ?? 0) / 1e9).toFixed(5)}</dd></div>
-          <div><dt>UNIQUE WALLETS</dt><dd>{stats.totals?.uniqueWallets ?? 0}</dd></div>
-          <div><dt>SUPPORTED TOKENS</dt><dd>{stats.totals?.supportedTokens ?? 0}</dd></div>
-          <div><dt>CLAIM</dt><dd>{actions.CLEAN_CLAIM ?? 0}</dd></div><div><dt>BURN</dt><dd>{actions.CLEAN_BURN ?? 0}</dd></div>
-          <div><dt>RECOVER</dt><dd>{actions.CLEAN_RECOVER ?? 0}</dd></div><div><dt>SEND</dt><dd>{actions.SEND ?? 0}</dd></div><div><dt>SWAP</dt><dd>{actions.SWAP ?? 0}</dd></div>
+    <aside ref={drawer} id="stats-drawer" className={`hud-drawer hud-drawer--right stats-drawer${open ? ' is-open' : ''}`} role="dialog" aria-modal="true" aria-hidden={!open} aria-labelledby="stats-title" tabIndex={-1} onKeyDown={trapDrawerFocus}>
+      <div className="drawer-header"><div><h2 id="stats-title">GASLESS STATS</h2><p>Live activity across GASLESS.</p></div><button type="button" aria-label="Close stats panel" onClick={onClose}>×</button></div>
+      <div className="stats-network-tabs" role="tablist" aria-label="Statistics network">
+        {PRODUCT_NETWORKS.map((item) => <button key={item.id} type="button" role="tab" aria-selected={selectedNetwork === item.id} className={selectedNetwork === item.id ? 'is-active' : ''} onClick={() => setSelectedNetwork(item.id)}>{item.shortName}</button>)}
+      </div>
+      {unavailable && selectedNetwork === 'solana' ? <p className="drawer-intro">LIVE STATISTICS ARE TEMPORARILY UNAVAILABLE.</p> : <>
+        <div className="stats-hero"><span>TOTAL GASLESS ACTIONS</span><strong className={loading ? 'is-loading' : undefined}>{value(selected.totalGaslessActions.toLocaleString())}</strong><small>{network.status === 'operational' ? 'RECONCILED ACTIVITY' : 'COMING SOON'}</small></div>
+        <dl className="stats-list stats-metrics" aria-busy={loading}>
+          {metrics.map(([label, content]) => <div key={label}><dt>{label}</dt><dd className={loading ? 'is-loading' : undefined}>{value(content)}</dd></div>)}
         </dl>
       </>}
-      <div className="drawer-footer"><i /><span>{stats?.visible ? `${stats.scope === 'local-private-pilot' ? 'LOCAL PILOT' : stats.network} / VERIFIED DATA` : 'PRIVATE PILOT / HIDDEN'}</span></div>
     </aside>
   );
 }

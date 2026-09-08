@@ -12,7 +12,7 @@ export class EmergencyControlService {
     if (!controls.relayerEnabled) throw new GaslessError('RELAYER_DISABLED', 'controls', 'GASLESS sponsorship is temporarily paused.');
     if (network === 'devnet' && !controls.devnetEnabled) throw new GaslessError('ACTION_DISABLED', 'controls', 'Devnet execution is disabled.');
     if (network === 'mainnet-beta' && !controls.mainnetEnabled) throw new GaslessError('ACTION_DISABLED', 'controls', 'Mainnet execution is disabled.');
-    const enabled = action === 'DEVNET_PROOF' ? controls.proofEnabled : action === 'CLEAN_CLAIM' ? controls.cleanEnabled && controls.claimEnabled : action === 'CLEAN_RECOVER' ? controls.cleanEnabled && controls.recoverEnabled : action === 'CLEAN_BURN' ? controls.cleanEnabled && controls.burnEnabled : action.startsWith('CLEAN_') ? controls.cleanEnabled : action === 'SWAP' ? controls.swapEnabled : controls.sendEnabled;
+    const enabled = action === 'DEVNET_PROOF' ? controls.proofEnabled : action === 'CLEAN_CLAIM' ? controls.cleanEnabled && controls.claimEnabled : action === 'CLEAN_RECOVER' ? controls.cleanEnabled && controls.recoverEnabled : action === 'CLEAN_BURN' ? controls.cleanEnabled && controls.burnEnabled : action.startsWith('CLEAN_') ? controls.cleanEnabled : action === 'SWAP' ? controls.swapEnabled : action === 'CROSS_CHAIN' ? controls.crossChainEnabled : controls.sendEnabled;
     if (!enabled) throw new GaslessError('ACTION_DISABLED', 'controls', action === 'CLEAN_CLAIM' ? 'Claim SOL is temporarily unavailable.' : action === 'SEND' ? 'Gasless Send is temporarily unavailable. Your tokens have not moved.' : 'This GASLESS action is temporarily disabled.');
     return controls;
   }

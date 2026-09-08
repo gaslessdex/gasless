@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { GaslessError } from '../errors.js';
+import { requestWithBackoff } from '../network/retry.js';
+import { log } from '../observability/logger.js';
+import { countApiUsage } from '../observability/api-usage.js';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const JUPITER_SWAP_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
@@ -16,6 +19,7 @@ export const APPROVED_DEX_FAMILIES = [RAYDIUM_CLMM_DEX, METEORA_DLMM_DEX, PUMPSW
 export type ApprovedDexFamily = typeof APPROVED_DEX_FAMILIES[number];
 export const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 export const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+export const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 export interface JupiterInstruction { programId: string; accounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>; data: string }
 export interface JupiterBuild {
@@ -29,7 +33,7 @@ export interface JupiterBuild {
 export type JupiterQuote = Pick<JupiterBuild, 'inputMint' | 'outputMint' | 'inAmount' | 'outAmount' | 'otherAmountThreshold' | 'swapMode' | 'slippageBps' | 'priceImpactPct' | 'routePlan'>;
 export interface JupiterQuoteRequest { inputMint: string; outputMint?: string; amount: string; slippageBps: number; dexes?: string[]; maxPriceImpactBps?: number }
 
-export interface JupiterRequest { inputMint: string; outputMint?: string; amount: string; taker: string; payer: string; destinationTokenAccount?: string; slippageBps: number; dexes?: string[]; blockhashSlotsToExpiry?: number }
+export interface JupiterRequest { inputMint: string; outputMint?: string; inputTokenProgram?: string; outputTokenProgram?: string; amount: string; taker: string; payer: string; destinationTokenAccount?: string; slippageBps: number; dexes?: string[]; blockhashSlotsToExpiry?: number }
 export interface JupiterExpectation extends JupiterRequest { outputMint?: string; outputAccount?: string; maxPriceImpactBps?: number }
 export interface JupiterRouter { quote(input: JupiterQuoteRequest): Promise<JupiterQuote>; build(input: JupiterRequest): Promise<JupiterBuild>; validate(build: JupiterBuild, expected: JupiterExpectation, currentBlockHeight: number): void; }
 
@@ -60,7 +64,7 @@ function assertInstruction(instruction: JupiterInstruction | null | undefined, a
   } catch { throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', `Jupiter returned a malformed ${label}.`); }
 }
 
-function associatedTokenAccount(owner: string, mint: string) { return PublicKey.findProgramAddressSync([new PublicKey(owner).toBuffer(), new PublicKey(TOKEN_PROGRAM_ID).toBuffer(), new PublicKey(mint).toBuffer()], new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID))[0].toBase58(); }
+function associatedTokenAccount(owner: string, mint: string, tokenProgram = TOKEN_PROGRAM_ID) { return PublicKey.findProgramAddressSync([new PublicKey(owner).toBuffer(), new PublicKey(tokenProgram).toBuffer(), new PublicKey(mint).toBuffer()], new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID))[0].toBase58(); }
 export function wrappedSolAccount(owner: string) { return associatedTokenAccount(owner, WRAPPED_SOL_MINT); }
 
 export function jupiterInstruction(value: JupiterInstruction) {
@@ -72,8 +76,21 @@ export function routeFingerprint(build: JupiterBuild) {
 }
 
 export class JupiterService implements JupiterRouter {
+  private readonly quoteCache = new Map<string, { expiresAt: number; promise: Promise<JupiterQuote> }>();
   constructor(private readonly apiUrl: string, private readonly apiKey?: string, private readonly request: typeof fetch = fetch) {}
   async quote(input: JupiterQuoteRequest) {
+    const key = JSON.stringify([input.inputMint, input.outputMint ?? WRAPPED_SOL_MINT, input.amount, input.slippageBps, input.dexes ?? [], input.maxPriceImpactBps ?? null]);
+    const cached = this.quoteCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) { countApiUsage('cacheHits'); return cached.promise; }
+    if (cached) this.quoteCache.delete(key);
+    countApiUsage('cacheMisses');
+    const promise = this.fetchQuote(input).catch((error) => { this.quoteCache.delete(key); throw error; });
+    this.quoteCache.set(key, { expiresAt: Date.now() + 2_000, promise });
+    if (this.quoteCache.size > 200) for (const [oldKey, value] of this.quoteCache) if (value.expiresAt <= Date.now()) this.quoteCache.delete(oldKey);
+    return promise;
+  }
+  private async fetchQuote(input: JupiterQuoteRequest) {
+    countApiUsage('jupiterQuoteRequests');
     if (!this.apiKey) throw new GaslessError('CONFIGURATION_ERROR', 'jupiter', 'Jupiter routing is not configured.');
     const outputMint = input.outputMint ?? WRAPPED_SOL_MINT;
     const quoteApiUrl = this.apiUrl.replace(/\/swap\/v2\/?$/, '/swap/v1');
@@ -81,7 +98,7 @@ export class JupiterService implements JupiterRouter {
     const params = new URLSearchParams({ inputMint: input.inputMint, outputMint, amount: input.amount, swapMode: 'ExactIn', slippageBps: String(input.slippageBps) });
     if (input.dexes?.length) params.set('dexes', input.dexes.join(','));
     let response: Response;
-    try { response = await this.request(`${quoteApiUrl}/quote?${params}`, { headers: { 'x-api-key': this.apiKey }, signal: AbortSignal.timeout(10_000) }); }
+    try { response = await requestWithBackoff(() => this.request(`${quoteApiUrl}/quote?${params}`, { headers: { 'x-api-key': this.apiKey! }, signal: AbortSignal.timeout(10_000) }), { onRetry: (status, delayMs) => { if (status === 429) countApiUsage('rateLimitedResponses'); log('warn', 'jupiter_quote_retry_scheduled', { status, delayMs }); } }); }
     catch (error) { throw new GaslessError('JUPITER_UNAVAILABLE', 'jupiter', 'A live swap route is temporarily unavailable.', true, undefined, { cause: error }); }
     if (!response.ok) throw new GaslessError(response.status === 400 ? 'TOKEN_UNSUPPORTED' : 'JUPITER_UNAVAILABLE', 'jupiter', response.status === 400 ? 'No safe swap route is available for this pair right now.' : 'A live swap route is temporarily unavailable.', response.status !== 400);
     const quote = await response.json() as JupiterQuote;
@@ -92,6 +109,7 @@ export class JupiterService implements JupiterRouter {
     return quote;
   }
   async build(input: JupiterRequest) {
+    countApiUsage('jupiterBuildRequests');
     if (!this.apiKey) throw new GaslessError('CONFIGURATION_ERROR', 'jupiter', 'Jupiter routing is not configured.');
     const outputMint = input.outputMint ?? WRAPPED_SOL_MINT;
     const blockhashSlotsToExpiry = input.blockhashSlotsToExpiry ?? 100;
@@ -101,7 +119,7 @@ export class JupiterService implements JupiterRouter {
     if (input.dexes?.length) params.set('dexes', input.dexes.join(','));
     if (outputMint === WRAPPED_SOL_MINT) params.set('nativeDestinationAccount', input.taker);
     let response: Response;
-    try { response = await this.request(`${this.apiUrl}/build?${params}`, { headers: { 'x-api-key': this.apiKey }, signal: AbortSignal.timeout(10_000) }); }
+    try { response = await requestWithBackoff(() => this.request(`${this.apiUrl}/build?${params}`, { headers: { 'x-api-key': this.apiKey! }, signal: AbortSignal.timeout(10_000) }), { onRetry: (status, delayMs) => { if (status === 429) countApiUsage('rateLimitedResponses'); log('warn', 'jupiter_build_retry_scheduled', { status, delayMs }); } }); }
     catch (error) { throw new GaslessError('JUPITER_UNAVAILABLE', 'jupiter', 'A live swap route is temporarily unavailable.', true, undefined, { cause: error }); }
     if (!response.ok) throw new GaslessError(response.status === 400 ? 'TOKEN_UNSUPPORTED' : 'JUPITER_UNAVAILABLE', 'jupiter', response.status === 400 ? 'No safe swap route is available for this pair right now.' : 'A live swap route is temporarily unavailable.', response.status !== 400);
     return await response.json() as JupiterBuild;
@@ -118,10 +136,13 @@ export class JupiterService implements JupiterRouter {
     try { if (!requiredDex || routeDexFamily(build) !== requiredDex) throw new Error(); for (const step of build.routePlan) { const info = step.swapInfo; if (!info?.inputMint || !info.outputMint || !positiveInteger(info.inAmount ?? '') || !positiveInteger(info.outAmount ?? '')) throw new Error(); new PublicKey(info.inputMint); new PublicKey(info.outputMint); } if (!build.routePlan.some((step) => step.swapInfo?.inputMint === build.inputMint) || !build.routePlan.some((step) => step.swapInfo?.outputMint === build.outputMint)) throw new Error(); } catch { throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', requiredDex ? `No safe ${requiredDex} route is available for this swap.` : 'Jupiter returned an invalid route plan.'); }
     build.computeBudgetInstructions.forEach((instruction) => { assertInstruction(instruction, new Set([COMPUTE_BUDGET_PROGRAM_ID]), 'compute instruction'); const data = Buffer.from(instruction.data, 'base64'); if (instruction.accounts.length || !((data[0] === 2 && data.length === 5) || (data[0] === 3 && data.length === 9))) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'Jupiter returned an unsupported compute instruction.'); });
     if (build.setupInstructions.length > 2) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'Jupiter returned too many setup instructions.');
+    const inputTokenProgram = expected.inputTokenProgram ?? TOKEN_PROGRAM_ID;
+    const outputTokenProgram = expected.outputTokenProgram ?? TOKEN_PROGRAM_ID;
+    if (![TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].includes(inputTokenProgram) || ![TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].includes(outputTokenProgram)) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'The route uses an unsupported token program.');
     const expectedOutputAccount = expected.outputAccount ?? wrappedSolAccount(expected.taker);
-    const setupAccounts = new Map([[associatedTokenAccount(expected.taker, expected.inputMint), expected.inputMint], [expectedOutputAccount, outputMint]]);
+    const setupAccounts = new Map([[associatedTokenAccount(expected.taker, expected.inputMint, inputTokenProgram), { mint: expected.inputMint, program: inputTokenProgram }], [expectedOutputAccount, { mint: outputMint, program: outputTokenProgram }]]);
     const seenSetupAccounts = new Set<string>();
-    build.setupInstructions.forEach((instruction) => { assertInstruction(instruction, new Set([ASSOCIATED_TOKEN_PROGRAM_ID]), 'setup instruction'); const keys = instruction.accounts.map((account) => account.pubkey); const flags = instruction.accounts.map((account) => `${Number(account.isSigner)}${Number(account.isWritable)}`).join(','); const mint = setupAccounts.get(keys[1] ?? ''); if (!mint || seenSetupAccounts.has(keys[1]!) || Buffer.from(instruction.data, 'base64').toString('hex') !== '01' || keys.length !== 6 || flags !== '11,01,00,00,00,00' || keys[0] !== expected.payer || keys[2] !== expected.taker || keys[3] !== mint || keys[4] !== SYSTEM_PROGRAM_ID || keys[5] !== TOKEN_PROGRAM_ID) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'Jupiter returned an unsafe setup instruction.'); seenSetupAccounts.add(keys[1]!); });
+    build.setupInstructions.forEach((instruction) => { assertInstruction(instruction, new Set([ASSOCIATED_TOKEN_PROGRAM_ID]), 'setup instruction'); const keys = instruction.accounts.map((account) => account.pubkey); const flags = instruction.accounts.map((account) => `${Number(account.isSigner)}${Number(account.isWritable)}`).join(','); const expectedSetup = setupAccounts.get(keys[1] ?? ''); if (!expectedSetup || seenSetupAccounts.has(keys[1]!) || Buffer.from(instruction.data, 'base64').toString('hex') !== '01' || keys.length !== 6 || flags !== '11,01,00,00,00,00' || keys[0] !== expected.payer || keys[2] !== expected.taker || keys[3] !== expectedSetup.mint || keys[4] !== SYSTEM_PROGRAM_ID || keys[5] !== expectedSetup.program) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'Jupiter returned an unsafe setup instruction.'); seenSetupAccounts.add(keys[1]!); });
     assertInstruction(build.swapInstruction, new Set([JUPITER_SWAP_PROGRAM_ID]), 'swap instruction');
     if (!build.swapInstruction.accounts.some((account) => account.pubkey === expectedOutputAccount && account.isWritable && !account.isSigner)) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'The Jupiter route is not bound to the approved output account.');
     if (!requiredDex || !build.swapInstruction.accounts.some((account) => account.pubkey === approvedDexProgram(requiredDex) && !account.isSigner)) throw new GaslessError('JUPITER_ROUTE_REJECTED', 'jupiter_validation', 'The route label does not match the approved DEX program.');

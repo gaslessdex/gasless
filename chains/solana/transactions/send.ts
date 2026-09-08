@@ -5,6 +5,8 @@ import { GaslessError } from '../../../server/errors.js';
 import type { SolanaRpc } from '../../../server/solana/rpc.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID } from '../send/accounts.js';
 import { LEGACY_TOKEN_PROGRAM_ID } from '../claim/accounts.js';
+import { TOKEN_2022_PROGRAM } from '../token-registry/types.js';
+import { createToken2022TransferChecked } from '../token-2022/transfer-hook.js';
 import { versionedMessageHash } from './clean.js';
 import { PHANTOM_LIGHTHOUSE_PROGRAM_ID, validatePhantomCompatibleTransaction } from './phantom.js';
 
@@ -53,33 +55,54 @@ function transferChecked(source: string, mint: string, destination: string, owne
   ], data });
 }
 
-function createAtaIdempotent(payer: string, ata: string, owner: string, mint: string) {
+function createAtaIdempotent(payer: string, ata: string, owner: string, mint: string, tokenProgram: string) {
   return new TransactionInstruction({ programId: new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID), keys: [
     { pubkey: new PublicKey(payer), isSigner: true, isWritable: true }, { pubkey: new PublicKey(ata), isSigner: false, isWritable: true },
     { pubkey: new PublicKey(owner), isSigner: false, isWritable: false }, { pubkey: new PublicKey(mint), isSigner: false, isWritable: false },
-    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, { pubkey: new PublicKey(LEGACY_TOKEN_PROGRAM_ID), isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, { pubkey: new PublicKey(tokenProgram), isSigner: false, isWritable: false },
   ], data: Buffer.from([1]) });
 }
 
-export function buildSendTransaction(input: { send: SendQuoteDetails; walletAddress: string; feePayer: string; blockhash: string; recipientAmount: bigint; reimbursement: bigint; serviceFee: bigint; computeUnitPriceMicroLamports?: bigint }) {
+export async function buildSendTransaction(input: { send: SendQuoteDetails; walletAddress: string; feePayer: string; blockhash: string; recipientAmount: bigint; reimbursement: bigint; serviceFee: bigint; computeUnitPriceMicroLamports?: bigint; rpc?: Pick<SolanaRpc, 'getAccountInfo'> }) {
   const computeUnitPrice = input.computeUnitPriceMicroLamports ?? SEND_COMPUTE_UNIT_PRICE_MICROLAMPORTS;
   calculateSendPriorityFeeLamports(computeUnitPrice);
+  const tokenProgram = input.send.token.tokenProgram;
+  if (tokenProgram !== LEGACY_TOKEN_PROGRAM_ID && tokenProgram !== TOKEN_2022_PROGRAM) throw new GaslessError('TOKEN_UNSUPPORTED', 'send_token_program', 'This token program is not supported for Send.');
+  const transfer = async (destination: string, amount: bigint) => {
+    if (tokenProgram === LEGACY_TOKEN_PROGRAM_ID) return transferChecked(input.send.token.sourceAccount, input.send.token.mint, destination, input.walletAddress, amount, input.send.token.decimals);
+    if (!input.rpc) throw new GaslessError('CONFIGURATION_ERROR', 'send_token_program', 'Token-2022 Send requires live mint validation.');
+    try {
+      return (await createToken2022TransferChecked({
+        rpc: input.rpc,
+        source: input.send.token.sourceAccount,
+        mint: input.send.token.mint,
+        destination,
+        owner: input.walletAddress,
+        amount,
+        decimals: input.send.token.decimals,
+        approvedHookProgramId: null,
+      })).instruction;
+    } catch {
+      throw new GaslessError('TOKEN_UNSUPPORTED', 'send_transfer_hook', 'This Token-2022 transfer profile changed and is not supported for Send.');
+    }
+  };
   const instructions = [
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: computeUnitPrice }),
     ComputeBudgetProgram.setComputeUnitLimit({ units: SEND_COMPUTE_UNIT_LIMIT }),
-    ...(!input.send.recipientAtaExists ? [createAtaIdempotent(input.feePayer, input.send.destinationAccount, input.send.recipientWallet, input.send.token.mint)] : []),
-    transferChecked(input.send.token.sourceAccount, input.send.token.mint, input.send.destinationAccount, input.walletAddress, input.recipientAmount, input.send.token.decimals),
-    transferChecked(input.send.token.sourceAccount, input.send.token.mint, input.send.reimbursementDestination, input.walletAddress, input.reimbursement, input.send.token.decimals),
-    transferChecked(input.send.token.sourceAccount, input.send.token.mint, input.send.serviceFeeDestination, input.walletAddress, input.serviceFee, input.send.token.decimals),
+    ...(!input.send.recipientAtaExists ? [createAtaIdempotent(input.feePayer, input.send.destinationAccount, input.send.recipientWallet, input.send.token.mint, tokenProgram)] : []),
+    await transfer(input.send.destinationAccount, input.recipientAmount),
+    await transfer(input.send.reimbursementDestination, input.reimbursement),
+    await transfer(input.send.serviceFeeDestination, input.serviceFee),
   ];
   const message = new TransactionMessage({ payerKey: new PublicKey(input.feePayer), recentBlockhash: input.blockhash, instructions }).compileToV0Message();
   return new VersionedTransaction(message);
 }
 
 export async function prepareSendTransaction(input: { quote: TransactionQuote; send: SendQuoteDetails; feePayer: string; rpc: SolanaRpc; ataRentLamports: bigint; tokenUsdPriceMicros: bigint; solUsdPriceMicros: bigint; reimbursementBufferBps: number; serviceFeeBps: number; serviceFeeCapUsdMicros: bigint; maximumSponsoredCostLamports: bigint }) {
+  const tokenProgram = input.send.token.tokenProgram;
   const blockhashStarted = Date.now(); const latest = await input.rpc.getLatestBlockhash(); const blockhashFetchedAt = new Date().toISOString(); const blockhashMs = Date.now() - blockhashStarted;
   const estimateBuildStarted = Date.now();
-  const estimate = buildSendTransaction({ send: input.send, walletAddress: input.quote.intent.walletAddress, feePayer: input.feePayer, blockhash: latest.blockhash, recipientAmount: input.send.max ? 1n : BigInt(input.send.recipientAmountRaw), reimbursement: 0n, serviceFee: 0n });
+  const estimate = await buildSendTransaction({ send: input.send, walletAddress: input.quote.intent.walletAddress, feePayer: input.feePayer, blockhash: latest.blockhash, recipientAmount: input.send.max ? 1n : BigInt(input.send.recipientAmountRaw), reimbursement: 0n, serviceFee: 0n, rpc: input.rpc });
   let transactionConstructionMs = Date.now() - estimateBuildStarted;
   const estimateFeeStarted = Date.now(); const fee = await input.rpc.getFeeForMessage(Buffer.from(estimate.message.serialize()).toString('base64')); let feeCalculationMs = Date.now() - estimateFeeStarted;
   if (fee === null) throw new GaslessError('RPC_ERROR', 'send_fee', 'We could not calculate a safe gasless fee right now.', true);
@@ -91,14 +114,14 @@ export async function prepareSendTransaction(input: { quote: TransactionQuote; s
   const serviceFee = calculateSendServiceFee(recipientAmount, input.send.token.decimals, input.tokenUsdPriceMicros, input.serviceFeeBps, input.serviceFeeCapUsdMicros);
   const total = recipientAmount + reimbursement + serviceFee;
   if (recipientAmount <= 0n || total > BigInt(input.send.token.balanceRaw)) throw new GaslessError('TOKEN_UNSUPPORTED', 'send_balance', `You need a little more ${input.send.token.symbol} to cover the amount, GASLESS fee, and sponsored network cost.`);
-  const exactBuildStarted = Date.now(); const transaction = buildSendTransaction({ send: input.send, walletAddress: input.quote.intent.walletAddress, feePayer: input.feePayer, blockhash: latest.blockhash, recipientAmount, reimbursement, serviceFee }); const transactionBuiltAt = new Date().toISOString(); transactionConstructionMs += Date.now() - exactBuildStarted;
+  const exactBuildStarted = Date.now(); const transaction = await buildSendTransaction({ send: input.send, walletAddress: input.quote.intent.walletAddress, feePayer: input.feePayer, blockhash: latest.blockhash, recipientAmount, reimbursement, serviceFee, rpc: input.rpc }); const transactionBuiltAt = new Date().toISOString(); transactionConstructionMs += Date.now() - exactBuildStarted;
   const exactFeeStarted = Date.now(); const exactFee = await input.rpc.getFeeForMessage(Buffer.from(transaction.message.serialize()).toString('base64')); feeCalculationMs += Date.now() - exactFeeStarted;
   if (exactFee !== fee) throw new GaslessError('RPC_ERROR', 'send_fee', 'The sponsored network cost changed while preparing Send.', true);
   const serialized = Buffer.from(transaction.serialize()).toString('base64');
   const simulationStarted = Date.now(); const simulated = await input.rpc.simulateTransaction(serialized, false); const simulationCompletedAt = new Date().toISOString(); const simulationMs = Date.now() - simulationStarted;
   const simulation: SimulationResult = { success: simulated.err === null, errorCode: simulated.err ? 'SIMULATION_FAILED' : undefined, logs: simulated.logs ?? undefined, unitsConsumed: simulated.unitsConsumed, provider: simulated.provider, simulatedAt: new Date().toISOString() };
   if (!simulation.success) throw new GaslessError('SIMULATION_FAILED', 'pre_signature_simulation', "This Send couldn't be safely prepared. Your tokens have not moved.");
-  const prepared: PreparedTransaction = { transactionId: crypto.randomUUID(), quoteId: input.quote.quoteId, intentId: input.quote.intent.intentId, walletAddress: input.quote.intent.walletAddress, network: input.quote.intent.network, serializedTransaction: serialized, preparedMessageHash: versionedMessageHash(transaction), expectedFeePayer: input.feePayer, expectedSigners: [input.feePayer, input.quote.intent.walletAddress], allowedProgramIds: [ComputeBudgetProgram.programId.toBase58(), LEGACY_TOKEN_PROGRAM_ID, ...(input.send.recipientAtaExists ? [] : [ASSOCIATED_TOKEN_PROGRAM_ID])], recentBlockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight, simulation };
+  const prepared: PreparedTransaction = { transactionId: crypto.randomUUID(), quoteId: input.quote.quoteId, intentId: input.quote.intent.intentId, walletAddress: input.quote.intent.walletAddress, network: input.quote.intent.network, serializedTransaction: serialized, preparedMessageHash: versionedMessageHash(transaction), expectedFeePayer: input.feePayer, expectedSigners: [input.feePayer, input.quote.intent.walletAddress], allowedProgramIds: [ComputeBudgetProgram.programId.toBase58(), tokenProgram, ...(input.send.recipientAtaExists ? [] : [ASSOCIATED_TOKEN_PROGRAM_ID])], recentBlockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight, simulation };
   return { prepared, recipientAmount, reimbursement, serviceFee, total, networkFeeLamports: BigInt(fee), sponsoredCostLamports: sponsored, timings: { blockhashMs, transactionConstructionMs, feeCalculationMs, simulationMs, blockhashFetchedAt, transactionBuiltAt, simulationCompletedAt } };
 }
 

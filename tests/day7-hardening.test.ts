@@ -44,6 +44,11 @@ test('wallet connection is unrestricted while each connected or switched account
   risk.assertWalletAllowed(denied, 'devnet');
 });
 
+test('public Mainnet accepts a normal wallet without the private pilot allowlist', () => {
+  const { risk } = fixture({ operatingMode: 'public-mainnet', pilotWalletAllowlist: [] });
+  risk.assertWalletAllowed(denied, 'mainnet-beta');
+});
+
 test('route limits bind both wallet and client address instead of request IDs', async () => {
   const { risk } = fixture();
   for (let index = 0; index < 3; index += 1) await risk.enforceRequest('SEND', 'quote', wallet, 'mainnet-beta', '203.0.113.4');
@@ -158,6 +163,9 @@ test('Kora errors are categorized, bounded, sanitized, and release-eligible only
   const policy = new KoraRelayerProvider('https://kora.invalid', 'auth', (async () => Response.json({ error: { code: -32602, message: 'Invalid transaction: fee payer cannot create account token=secret https://rpc.invalid/?api-key=secret' } }, { status: 400 })) as typeof fetch);
   let caught: unknown; try { await policy.signTransaction('ignored'); } catch (error) { caught = error; }
   const failure = koraFailure(caught); assert.equal(failure?.category, 'KORA_POLICY_INVALID_TRANSACTION'); assert.equal(failure?.rpcCode, -32602); assert.equal(failure?.deterministicPreSignRejection, true); assert.equal(failure?.payerSignatureReturned, false); assert.ok((failure?.reason.length ?? 999) <= 256); assert.equal(failure?.reason.includes('secret'), false);
+  const signerWordPolicy = new KoraRelayerProvider('https://kora.invalid', 'auth', (async () => Response.json({ error: { code: -32602, message: 'Invalid transaction: Swap requires exactly the configured payer and one user signer' } }, { status: 400 })) as typeof fetch);
+  caught = undefined; try { await signerWordPolicy.signTransaction('ignored'); } catch (error) { caught = error; }
+  assert.equal(koraFailure(caught)?.category, 'KORA_POLICY_INVALID_TRANSACTION'); assert.equal(koraFailure(caught)?.deterministicPreSignRejection, true);
   const timeout = new KoraRelayerProvider('https://kora.invalid', 'auth', (async () => { throw new Error('timeout'); }) as typeof fetch); caught = undefined; try { await timeout.signTransaction('ignored'); } catch (error) { caught = error; } assert.equal(koraFailure(caught)?.category, 'KORA_RPC_ERROR'); assert.equal(koraFailure(caught)?.deterministicPreSignRejection, false);
   for (const [status, category] of [[401, 'KORA_AUTH_ERROR'], [429, 'KORA_RATE_LIMIT'], [502, 'KORA_RPC_ERROR'], [200, 'KORA_MALFORMED_RESPONSE']] as const) {
     const malformed = new KoraRelayerProvider('https://kora.invalid', 'auth', (async () => new Response('not-json', { status })) as typeof fetch); caught = undefined; try { await malformed.signTransaction('ignored'); } catch (error) { caught = error; } assert.equal(koraFailure(caught)?.category, category); assert.equal(koraFailure(caught)?.deterministicPreSignRejection, false);

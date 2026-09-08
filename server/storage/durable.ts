@@ -9,6 +9,7 @@ export const DEVNET_CONTROLS: SystemControls = {
   cleanEnabled: true,
   swapEnabled: true,
   sendEnabled: true,
+  crossChainEnabled: true,
   proofEnabled: true,
   claimEnabled: true,
   burnEnabled: true,
@@ -68,7 +69,7 @@ export class MemoryDurableStore implements DurableStore {
   async recordSwapAccounting(record: DurableTransactionRecord, actualNetworkFeeLamports: string, actualOutputRaw: string) { await this.appendEvent(record.id, 'swap_succeeded', 'accounting', { walletAddress: record.walletAddress, inputMint: record.inputMint, outputMint: record.outputMint, totalInputRaw: record.tokenAmountRaw, routedInputRaw: record.routedInputRaw, minimumOutputRaw: record.minimumOutputRaw, actualOutputRaw, serviceFeeRaw: record.serviceFeeRaw, sponsorReimbursementRaw: record.sponsorReimbursementRaw, actualNetworkFeeLamports, outputAtaRentLamports: record.outputAtaRentLamports }, `${record.id}:swap_accounting`); }
   async getControls() { return { ...this.controls }; }
   async setControl(key: string, enabled: boolean) {
-    const map: Record<string, keyof SystemControls> = { global_execution: 'globalExecutionEnabled', relayer: 'relayerEnabled', devnet: 'devnetEnabled', mainnet: 'mainnetEnabled', clean: 'cleanEnabled', claim: 'claimEnabled', recover: 'recoverEnabled', burn: 'burnEnabled', swap: 'swapEnabled', send: 'sendEnabled', devnet_proof: 'proofEnabled' };
+    const map: Record<string, keyof SystemControls> = { global_execution: 'globalExecutionEnabled', relayer: 'relayerEnabled', devnet: 'devnetEnabled', mainnet: 'mainnetEnabled', clean: 'cleanEnabled', claim: 'claimEnabled', recover: 'recoverEnabled', burn: 'burnEnabled', swap: 'swapEnabled', send: 'sendEnabled', cross_chain: 'crossChainEnabled', devnet_proof: 'proofEnabled' };
     if (!map[key]) throw new GaslessError('INVALID_REQUEST', 'controls', 'Unknown safety control.');
     (this.controls[map[key]] as boolean) = enabled;
   }
@@ -81,9 +82,11 @@ export class SupabaseDurableStore implements DurableStore {
   constructor(private readonly url: string, private readonly key: string) {}
 
   private async request(path: string, method = 'GET', body?: unknown, prefer?: string) {
+    const headers: Record<string, string> = { apikey: this.key, 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}) };
+    if (!this.key.startsWith('sb_secret_')) headers.Authorization = `Bearer ${this.key}`;
     const response = await fetch(`${this.url}/rest/v1/${path}`, {
       method,
-      headers: { apikey: this.key, Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}) },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(7_000),
     });
@@ -204,7 +207,7 @@ export class SupabaseDurableStore implements DurableStore {
   async getControls() {
     const rows = await this.request('system_controls?select=control_key,enabled,text_value') as Array<{ control_key: string; enabled: boolean; text_value?: string }>;
     const values = new Map(rows.map((row) => [row.control_key, row]));
-    const required = ['global_execution', 'relayer', 'devnet', 'mainnet', 'clean', 'claim', 'recover', 'burn', 'swap', 'send', 'devnet_proof'];
+    const required = ['global_execution', 'relayer', 'devnet', 'mainnet', 'clean', 'claim', 'recover', 'burn', 'swap', 'send', 'cross_chain', 'devnet_proof'];
     if (required.some((key) => !values.has(key))) throw new GaslessError('CONFIGURATION_ERROR', 'controls', 'Safety controls are unavailable.');
     return {
       globalExecutionEnabled: values.get('global_execution')!.enabled,
@@ -214,6 +217,7 @@ export class SupabaseDurableStore implements DurableStore {
       cleanEnabled: values.get('clean')!.enabled,
       swapEnabled: values.get('swap')!.enabled,
       sendEnabled: values.get('send')!.enabled,
+      crossChainEnabled: values.get('cross_chain')!.enabled,
       proofEnabled: values.get('devnet_proof')!.enabled,
       claimEnabled: values.get('claim')!.enabled,
       recoverEnabled: values.get('recover')!.enabled,
@@ -222,29 +226,46 @@ export class SupabaseDurableStore implements DurableStore {
     };
   }
   async setControl(key: string, enabled: boolean) {
-    const allowed = new Set(['global_execution', 'relayer', 'devnet', 'mainnet', 'clean', 'claim', 'recover', 'burn', 'swap', 'send', 'devnet_proof']);
+    const allowed = new Set(['global_execution', 'relayer', 'devnet', 'mainnet', 'clean', 'claim', 'recover', 'burn', 'swap', 'send', 'cross_chain', 'devnet_proof']);
     if (!allowed.has(key)) throw new GaslessError('INVALID_REQUEST', 'controls', 'Unknown safety control.');
     await this.request(`system_controls?control_key=eq.${encodeURIComponent(key)}`, 'PATCH', { enabled, updated_at: new Date().toISOString() }, 'return=minimal');
   }
   async getOperatorMetrics(network?: SolanaNetwork) {
     const filter = network ? `&network=eq.${encodeURIComponent(network)}` : '';
-    const rows = await this.request(`transactions?select=id,quote_id,wallet_address,action_type,network,status,signature,sponsored_cost_lamports,gasless_fee_lamports,swap_service_fee_lamports,rent_service_fee_lamports,sponsor_reimbursement_raw,service_fee_raw,mint,input_mint,output_mint,token_amount_raw,expected_output_raw,actual_output_raw,minimum_output_raw,ata_creation_lamports,output_ata_rent_lamports,error_code,error_stage,updated_at${filter}&order=updated_at.desc&limit=1000`) as SupabaseRow[];
-    return summarizeTransactions(rows.map((row) => ({ id: String(row.id), intentId: '', quoteId: String(row.quote_id), walletAddress: String(row.wallet_address), actionType: row.action_type as DurableTransactionRecord['actionType'], network: row.network as SolanaNetwork, status: row.status as DurableTransactionRecord['status'], signature: row.signature as string | undefined, sponsoredCostLamports: row.sponsored_cost_lamports as string | undefined, gaslessFeeLamports: row.gasless_fee_lamports as string | undefined, swapServiceFeeLamports: row.swap_service_fee_lamports as string | undefined, rentServiceFeeLamports: row.rent_service_fee_lamports as string | undefined, sponsorReimbursementRaw: row.sponsor_reimbursement_raw as string | undefined, serviceFeeRaw: row.service_fee_raw as string | undefined, mint: row.mint as string | undefined, inputMint: row.input_mint as string | undefined, outputMint: row.output_mint as string | undefined, tokenAmountRaw: row.token_amount_raw as string | undefined, expectedOutputRaw: row.expected_output_raw as string | undefined, actualOutputRaw: row.actual_output_raw as string | undefined, minimumOutputRaw: row.minimum_output_raw as string | undefined, ataCreationLamports: row.ata_creation_lamports as string | undefined, outputAtaRentLamports: row.output_ata_rent_lamports as string | undefined, errorCode: row.error_code as string | undefined, errorStage: row.error_stage as string | undefined, createdAt: String(row.updated_at), updatedAt: String(row.updated_at) })));
+    const rows: SupabaseRow[] = [];
+    const pageSize = 1000;
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await this.request(`transactions?select=id,intent_id,quote_id,wallet_address,action_type,network,status,signature,sponsored_cost_lamports,network_fee_lamports,gasless_fee_lamports,swap_service_fee_lamports,rent_service_fee_lamports,sponsor_reimbursement_raw,service_fee_raw,mint,input_mint,output_mint,token_amount_raw,expected_output_raw,actual_output_raw,minimum_output_raw,ata_creation_lamports,output_ata_rent_lamports,destination_chain_id,error_code,error_stage,updated_at${filter}&order=updated_at.desc&limit=${pageSize}&offset=${offset}`) as SupabaseRow[];
+      rows.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return summarizeTransactions(rows.map((row) => ({ id: String(row.id), intentId: String(row.intent_id), quoteId: String(row.quote_id), walletAddress: String(row.wallet_address), actionType: row.action_type as DurableTransactionRecord['actionType'], network: row.network as SolanaNetwork, status: row.status as DurableTransactionRecord['status'], signature: row.signature as string | undefined, sponsoredCostLamports: row.sponsored_cost_lamports as string | undefined, networkFeeLamports: row.network_fee_lamports as string | undefined, gaslessFeeLamports: row.gasless_fee_lamports as string | undefined, swapServiceFeeLamports: row.swap_service_fee_lamports as string | undefined, rentServiceFeeLamports: row.rent_service_fee_lamports as string | undefined, sponsorReimbursementRaw: row.sponsor_reimbursement_raw as string | undefined, serviceFeeRaw: row.service_fee_raw as string | undefined, mint: row.mint as string | undefined, inputMint: row.input_mint as string | undefined, outputMint: row.output_mint as string | undefined, tokenAmountRaw: row.token_amount_raw as string | undefined, expectedOutputRaw: row.expected_output_raw as string | undefined, actualOutputRaw: row.actual_output_raw as string | undefined, minimumOutputRaw: row.minimum_output_raw as string | undefined, ataCreationLamports: row.ata_creation_lamports as string | undefined, outputAtaRentLamports: row.output_ata_rent_lamports as string | undefined, destinationChainId: row.destination_chain_id as number | undefined, errorCode: row.error_code as string | undefined, errorStage: row.error_stage as string | undefined, createdAt: String(row.updated_at), updatedAt: String(row.updated_at) })));
   }
   private toRow(record: Partial<DurableTransactionRecord>) {
     const map: Record<string, string> = { intentId: 'intent_id', quoteId: 'quote_id', walletAddress: 'wallet_address', actionType: 'action_type', preparedMessageHash: 'prepared_message_hash', recentBlockhash: 'recent_blockhash', lastValidBlockHeight: 'last_valid_block_height', submittedAt: 'submitted_at', confirmedAt: 'confirmed_at', failedAt: 'failed_at', errorCode: 'error_code', errorStage: 'error_stage', createdAt: 'created_at', updatedAt: 'updated_at', batchIndex: 'batch_index', accountAddresses: 'account_addresses', grossRecoveredLamports: 'gross_recovered_lamports', gaslessFeeLamports: 'gasless_fee_lamports', sponsoredCostLamports: 'sponsored_cost_lamports', netUserLamports: 'net_user_lamports', relayerAddress: 'relayer_address', feeDestination: 'fee_destination', mint: 'mint', tokenAccount: 'token_account', tokenAmountRaw: 'token_amount_raw', tokenDecimals: 'token_decimals', mintSupplyRaw: 'mint_supply_raw', estimatedSwapOutputLamports: 'estimated_swap_output_lamports', minimumSwapOutputLamports: 'minimum_swap_output_lamports', swapServiceFeeLamports: 'swap_service_fee_lamports', rentServiceFeeLamports: 'rent_service_fee_lamports', networkFeeLamports: 'network_fee_lamports', temporaryAccountRentLamports: 'temporary_account_rent_lamports', recipientWallet: 'recipient_wallet', destinationAccount: 'destination_account', recipientAtaCreated: 'recipient_ata_created', recipientAmountRaw: 'recipient_amount_raw', sponsorReimbursementRaw: 'sponsor_reimbursement_raw', serviceFeeRaw: 'service_fee_raw', totalDebitRaw: 'total_debit_raw', ataCreationLamports: 'ata_creation_lamports', reimbursementDestination: 'reimbursement_destination', serviceFeeDestination: 'service_fee_destination', inputMint: 'input_mint', outputMint: 'output_mint', routedInputRaw: 'routed_input_raw', expectedOutputRaw: 'expected_output_raw', minimumOutputRaw: 'minimum_output_raw', outputAccount: 'output_account', outputAtaCreated: 'output_ata_created', outputAtaRentLamports: 'output_ata_rent_lamports', slippageBps: 'slippage_bps', priceImpactBps: 'price_impact_bps', routeFingerprint: 'route_fingerprint' };
     map.outputTokenDecimals = 'output_token_decimals';
     map.actualOutputRaw = 'actual_output_raw';
+    map.sourceAsset = 'source_asset';
+    map.destinationChainId = 'destination_chain_id';
+    map.destinationAsset = 'destination_asset';
+    map.crossChainRecipient = 'cross_chain_recipient';
+    map.relayRequestId = 'relay_request_id';
+    map.relayOrderId = 'relay_order_id';
+    map.quoteExpiresAt = 'quote_expires_at';
+    map.crossChainStatus = 'cross_chain_status';
     return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined).map(([key, value]) => [map[key] ?? key, value]));
   }
   private fromRow(row: SupabaseRow): DurableTransactionRecord {
-    return { id: String(row.id), intentId: String(row.intent_id), quoteId: String(row.quote_id), walletAddress: String(row.wallet_address), actionType: row.action_type as DurableTransactionRecord['actionType'], network: row.network as 'devnet', status: row.status as DurableTransactionRecord['status'], preparedMessageHash: row.prepared_message_hash as string | undefined, recentBlockhash: row.recent_blockhash as string | undefined, lastValidBlockHeight: row.last_valid_block_height as number | undefined, signature: row.signature as string | undefined, submittedAt: row.submitted_at as string | undefined, confirmedAt: row.confirmed_at as string | undefined, failedAt: row.failed_at as string | undefined, errorCode: row.error_code as string | undefined, errorStage: row.error_stage as string | undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at), batchIndex: row.batch_index as number | undefined, accountAddresses: row.account_addresses as string[] | undefined, grossRecoveredLamports: row.gross_recovered_lamports as string | undefined, gaslessFeeLamports: row.gasless_fee_lamports as string | undefined, sponsoredCostLamports: row.sponsored_cost_lamports as string | undefined, netUserLamports: row.net_user_lamports as string | undefined, relayerAddress: row.relayer_address as string | undefined, feeDestination: row.fee_destination as string | undefined, mint: row.mint as string | undefined, tokenAccount: row.token_account as string | undefined, tokenAmountRaw: row.token_amount_raw as string | undefined, tokenDecimals: row.token_decimals as number | undefined, mintSupplyRaw: row.mint_supply_raw as string | undefined, estimatedSwapOutputLamports: row.estimated_swap_output_lamports as string | undefined, minimumSwapOutputLamports: row.minimum_swap_output_lamports as string | undefined, swapServiceFeeLamports: row.swap_service_fee_lamports as string | undefined, rentServiceFeeLamports: row.rent_service_fee_lamports as string | undefined, networkFeeLamports: row.network_fee_lamports as string | undefined, temporaryAccountRentLamports: row.temporary_account_rent_lamports as string | undefined, recipientWallet: row.recipient_wallet as string | undefined, destinationAccount: row.destination_account as string | undefined, recipientAtaCreated: row.recipient_ata_created as boolean | undefined, recipientAmountRaw: row.recipient_amount_raw as string | undefined, sponsorReimbursementRaw: row.sponsor_reimbursement_raw as string | undefined, serviceFeeRaw: row.service_fee_raw as string | undefined, totalDebitRaw: row.total_debit_raw as string | undefined, ataCreationLamports: row.ata_creation_lamports as string | undefined, reimbursementDestination: row.reimbursement_destination as string | undefined, serviceFeeDestination: row.service_fee_destination as string | undefined };
+    const record = { id: String(row.id), intentId: String(row.intent_id), quoteId: String(row.quote_id), walletAddress: String(row.wallet_address), actionType: row.action_type as DurableTransactionRecord['actionType'], network: row.network as 'devnet', status: row.status as DurableTransactionRecord['status'], preparedMessageHash: row.prepared_message_hash as string | undefined, recentBlockhash: row.recent_blockhash as string | undefined, lastValidBlockHeight: row.last_valid_block_height as number | undefined, signature: row.signature as string | undefined, submittedAt: row.submitted_at as string | undefined, confirmedAt: row.confirmed_at as string | undefined, failedAt: row.failed_at as string | undefined, errorCode: row.error_code as string | undefined, errorStage: row.error_stage as string | undefined, createdAt: String(row.created_at), updatedAt: String(row.updated_at), batchIndex: row.batch_index as number | undefined, accountAddresses: row.account_addresses as string[] | undefined, grossRecoveredLamports: row.gross_recovered_lamports as string | undefined, gaslessFeeLamports: row.gasless_fee_lamports as string | undefined, sponsoredCostLamports: row.sponsored_cost_lamports as string | undefined, netUserLamports: row.net_user_lamports as string | undefined, relayerAddress: row.relayer_address as string | undefined, feeDestination: row.fee_destination as string | undefined, mint: row.mint as string | undefined, tokenAccount: row.token_account as string | undefined, tokenAmountRaw: row.token_amount_raw as string | undefined, tokenDecimals: row.token_decimals as number | undefined, mintSupplyRaw: row.mint_supply_raw as string | undefined, estimatedSwapOutputLamports: row.estimated_swap_output_lamports as string | undefined, minimumSwapOutputLamports: row.minimum_swap_output_lamports as string | undefined, swapServiceFeeLamports: row.swap_service_fee_lamports as string | undefined, rentServiceFeeLamports: row.rent_service_fee_lamports as string | undefined, networkFeeLamports: row.network_fee_lamports as string | undefined, temporaryAccountRentLamports: row.temporary_account_rent_lamports as string | undefined, recipientWallet: row.recipient_wallet as string | undefined, destinationAccount: row.destination_account as string | undefined, recipientAtaCreated: row.recipient_ata_created as boolean | undefined, recipientAmountRaw: row.recipient_amount_raw as string | undefined, sponsorReimbursementRaw: row.sponsor_reimbursement_raw as string | undefined, serviceFeeRaw: row.service_fee_raw as string | undefined, totalDebitRaw: row.total_debit_raw as string | undefined, ataCreationLamports: row.ata_creation_lamports as string | undefined, reimbursementDestination: row.reimbursement_destination as string | undefined, serviceFeeDestination: row.service_fee_destination as string | undefined };
+    Object.assign(record, { sourceAsset: row.source_asset as string | undefined, destinationChainId: row.destination_chain_id as number | undefined, destinationAsset: row.destination_asset as string | undefined, crossChainRecipient: row.cross_chain_recipient as string | undefined, relayRequestId: row.relay_request_id as string | undefined, relayOrderId: row.relay_order_id as string | undefined, quoteExpiresAt: row.quote_expires_at as string | undefined, crossChainStatus: row.cross_chain_status as string | undefined });
+    return record;
   }
 }
 
 function summarizeTransactions(records: DurableTransactionRecord[]) {
-  const succeeded = new Set(['confirmed', 'reconciled']);
+  const succeeded = new Set(['reconciled']);
   const pending = new Set(['prepared', 'simulated', 'awaiting_user_signature', 'user_signed', 'validated', 'relaying', 'submitted']);
+  const publicActions = new Set(['CLEAN_CLAIM', 'CLEAN_RECOVER', 'CLEAN_BURN', 'SWAP', 'SEND', 'CROSS_CHAIN']);
   const byAction: Record<string, number> = {};
   let sponsored = 0n;
   let sponsored24h = 0n;
@@ -253,12 +274,18 @@ function summarizeTransactions(records: DurableTransactionRecord[]) {
   const reimbursementByMint: Record<string, string> = {};
   const serviceFeeByMint: Record<string, string> = {};
   const successfulByAction: Record<string, number> = {};
+  let publicSponsoredTransactions = 0;
+  let publicSponsoredLamports = 0n;
   for (const record of records) {
     byAction[record.actionType] = (byAction[record.actionType] ?? 0) + 1;
     if (succeeded.has(record.status)) {
       successfulByAction[record.actionType] = (successfulByAction[record.actionType] ?? 0) + 1;
-      const sponsoredCost = BigInt(record.sponsoredCostLamports ?? '0');
+      const sponsoredCost = BigInt(record.actionType === 'CROSS_CHAIN' ? record.networkFeeLamports ?? '0' : record.networkFeeLamports ?? record.sponsoredCostLamports ?? '0');
       sponsored += sponsoredCost;
+      if (publicActions.has(record.actionType)) {
+        publicSponsoredLamports += sponsoredCost;
+        if (sponsoredCost > 0n) publicSponsoredTransactions += 1;
+      }
       if (Date.parse(record.updatedAt) >= cutoff) sponsored24h += sponsoredCost;
       serviceFeeLamports += BigInt(record.gaslessFeeLamports ?? '0') + BigInt(record.swapServiceFeeLamports ?? '0') + BigInt(record.rentServiceFeeLamports ?? '0');
       const reimbursementMint = record.mint ?? record.inputMint;
@@ -266,6 +293,24 @@ function summarizeTransactions(records: DurableTransactionRecord[]) {
       if (reimbursementMint && record.serviceFeeRaw) serviceFeeByMint[reimbursementMint] = (BigInt(serviceFeeByMint[reimbursementMint] ?? '0') + BigInt(record.serviceFeeRaw)).toString();
     }
   }
+  const logicalActions = new Map<string, DurableTransactionRecord[]>();
+  for (const record of records) {
+    const key = record.intentId || record.quoteId || record.id;
+    const group = logicalActions.get(key);
+    if (group) group.push(record);
+    else logicalActions.set(key, [record]);
+  }
+  const successfulLogicalByAction: Record<string, number> = {};
+  const successfulLogicalCrossChainByDestination: Record<string, number> = {};
+  for (const group of logicalActions.values()) {
+    if (!group.length || !group.every((record) => succeeded.has(record.status))) continue;
+    const actionType = group[0].actionType;
+    if (!group.every((record) => record.actionType === actionType)) continue;
+    successfulLogicalByAction[actionType] = (successfulLogicalByAction[actionType] ?? 0) + 1;
+    if (actionType === 'CROSS_CHAIN') {
+      for (const destination of new Set(group.flatMap((record) => record.destinationChainId === undefined ? [] : [String(record.destinationChainId)]))) successfulLogicalCrossChainByDestination[destination] = (successfulLogicalCrossChainByDestination[destination] ?? 0) + 1;
+    }
+  }
   const recent = [...records].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100).map(({ id, quoteId, walletAddress, actionType, network, status, signature, sponsoredCostLamports, gaslessFeeLamports, sponsorReimbursementRaw, serviceFeeRaw, mint, inputMint, outputMint, tokenAmountRaw, expectedOutputRaw, actualOutputRaw, minimumOutputRaw, ataCreationLamports, outputAtaRentLamports, errorCode, errorStage, updatedAt }) => ({ id, quoteId, walletAddress, actionType, network, status, signature, sponsoredCostLamports, gaslessFeeLamports, sponsorReimbursementRaw, serviceFeeRaw, mint, inputMint, outputMint, tokenAmountRaw, expectedOutputRaw, actualOutputRaw, minimumOutputRaw, ataCreationLamports, outputAtaRentLamports, errorCode, errorStage, updatedAt }));
-  return { totalActions: records.length, successCount: records.filter((record) => succeeded.has(record.status)).length, failureCount: records.filter((record) => record.status === 'failed').length, pendingCount: records.filter((record) => pending.has(record.status)).length, uniqueWalletCount: new Set(records.filter((record) => succeeded.has(record.status)).map((record) => record.walletAddress)).size, sponsoredLamports: sponsored.toString(), sponsored24hLamports: sponsored24h.toString(), serviceFeeLamports: serviceFeeLamports.toString(), reimbursementByMint, serviceFeeByMint, byAction, successfulByAction, recent };
+  return { totalActions: records.length, successCount: records.filter((record) => succeeded.has(record.status)).length, failureCount: records.filter((record) => record.status === 'failed').length, pendingCount: records.filter((record) => pending.has(record.status)).length, uniqueWalletCount: new Set(records.filter((record) => succeeded.has(record.status)).map((record) => record.walletAddress)).size, sponsoredLamports: sponsored.toString(), sponsored24hLamports: sponsored24h.toString(), publicSponsoredTransactions, publicSponsoredLamports: publicSponsoredLamports.toString(), serviceFeeLamports: serviceFeeLamports.toString(), reimbursementByMint, serviceFeeByMint, byAction, successfulByAction, successfulLogicalByAction, successfulLogicalCrossChainByDestination, recent };
 }

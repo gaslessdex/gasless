@@ -1,7 +1,7 @@
-# Solana V1
+# Solana
 
-GASLESS Solana V1 implements CLEAN · SWAP · SEND for eligible zero-SOL wallets through a server-authoritative, non-custodial sponsorship model.
+Solana is the active GASLESS execution network for CLEAN, SWAP, SEND, and the sponsored origin side of supported cross-chain routes.
 
-CLEAN includes Claim SOL, Recover Value, and Burn. SWAP uses Jupiter with an approved underlying route-family policy. SEND performs an exact token transfer without disguising a swap as a transfer.
+CLEAN includes Claim SOL, Recover Value, and Burn. SWAP uses Jupiter with action-specific token and route-family policy. SEND transfers an exact recipient amount and can create only the canonical recipient account when required. Cross-chain execution validates a Relay route and transaction before the sponsored Solana origin is signed and submitted.
 
-Engineering and controlled private-mainnet pilot execution are proven. Public sponsorship remains intentionally gated and token onboarding remains operator-reviewed.
+Availability is dynamic and server-authoritative. A connected wallet, registry entry, or displayed asset does not bypass current account, route, liquidity, health, sponsorship, or simulation checks.

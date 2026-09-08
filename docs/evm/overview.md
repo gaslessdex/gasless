@@ -1,7 +1,7 @@
 # EVM direction
 
-GASLESS plans one shared EVM architecture for BRIDGE · SWAP · SEND. Robinhood Chain is the first target, followed by Base and BNB Chain.
+Robinhood Chain is currently a supported destination for eligible Solana-origin Relay execution where a current route is available. The origin transaction and GASLESS sponsorship occur on Solana; Relay coordinates destination delivery and status.
 
-The EVM design will use server-authoritative construction, chain-ID and domain binding, target and calldata allowlists, replay-safe authorization, bounded relayer sponsorship, simulation, accounting, and reconciliation adapted to EVM semantics. Existing audited protocols are preferred; custom GASLESS contracts require a concrete security need.
+Native EVM-origin GASLESS BRIDGE, SWAP, and SEND are separate future work. Base and BNB Chain are planned and not active for execution in this repository.
 
-No EVM transaction execution is implemented in this Solana repository. See the architectural scaffold at [gaslessdex/gasless-evm](https://github.com/gaslessdex/gasless-evm).
+Future native EVM work must retain exact chain/domain binding, target and calldata policy, replay-safe authorization, bounded sponsorship, simulation, accounting, and reconciliation. See the [EVM foundation](https://github.com/gaslessdex/gasless-evm).

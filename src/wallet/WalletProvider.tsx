@@ -63,7 +63,7 @@ function WalletRow({ connector, connecting, label, onConnect }: {
 
 function DirectoryWalletIcon({ entry }: { entry: WalletDirectoryEntry }) {
   const [failed, setFailed] = useState(false);
-  return failed || !entry.icon
+  return failed
     ? <span className="wallet-monogram" aria-hidden="true">{entry.name.slice(0, 1)}</span>
     : <img src={entry.icon} alt="" onError={() => setFailed(true)} />;
 }

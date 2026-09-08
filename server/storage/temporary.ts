@@ -1,11 +1,25 @@
 import type { TransactionQuote, WalletSession } from '../../shared/transactions/types.js';
+import type { CrossChainQuote } from '../../shared/cross-chain/types.js';
+import type { ValidatedRelayTransaction } from '../../chains/solana/relay/validator.js';
+import type { RelayQuoteResponse } from '../relay/client.js';
 import { GaslessError } from '../errors.js';
+
+export interface StoredCrossChainQuote { quote: CrossChainQuote; walletAddress: string; providerRequestId: string; inputAmountRaw: string; providerQuote?: RelayQuoteResponse }
+export interface StoredCrossChainAttempt { transactionId: string; validated: ValidatedRelayTransaction; sponsorSignedTransaction: string }
+
+export interface BrowserVerificationSession { sessionId: string; userAgentHash: string; createdAt: string; expiresAt: string }
 
 export interface TemporaryStore {
   saveSession(session: WalletSession, ttlSeconds: number): Promise<void>;
   getSession(sessionId: string): Promise<WalletSession | null>;
+  saveBrowserVerification(session: BrowserVerificationSession, ttlSeconds: number): Promise<void>;
+  getBrowserVerification(sessionId: string): Promise<BrowserVerificationSession | null>;
   saveQuote(quote: TransactionQuote, ttlSeconds: number): Promise<void>;
   getQuote(quoteId: string): Promise<TransactionQuote | null>;
+  saveCrossChainQuote(quote: StoredCrossChainQuote, ttlSeconds: number): Promise<void>;
+  getCrossChainQuote(quoteId: string): Promise<StoredCrossChainQuote | null>;
+  saveCrossChainAttempt(attempt: StoredCrossChainAttempt, ttlSeconds: number): Promise<void>;
+  getCrossChainAttempt(transactionId: string): Promise<StoredCrossChainAttempt | null>;
   setAuthoritativeSwapQuote(key: string, quoteId: string, version: number, ttlSeconds: number): Promise<boolean>;
   isAuthoritativeSwapQuote(key: string, quoteId: string): Promise<boolean>;
   acquireReplayLock(key: string, value: string, ttlSeconds: number): Promise<boolean>;
@@ -35,6 +49,13 @@ export class MemoryTemporaryStore implements TemporaryStore {
     const item = this.current(`gasless:session:${sessionId}`);
     return item ? JSON.parse(item.value) as WalletSession : null;
   }
+  async saveBrowserVerification(session: BrowserVerificationSession, ttlSeconds: number) {
+    this.values.set(`gasless:browser:${session.sessionId}`, { value: JSON.stringify(session), expires: this.now() + ttlSeconds * 1000 });
+  }
+  async getBrowserVerification(sessionId: string) {
+    const item = this.current(`gasless:browser:${sessionId}`);
+    return item ? JSON.parse(item.value) as BrowserVerificationSession : null;
+  }
   async saveQuote(quote: TransactionQuote, ttlSeconds: number) {
     this.values.set(`gasless:quote:${quote.quoteId}`, { value: JSON.stringify(quote), expires: this.now() + ttlSeconds * 1000 });
   }
@@ -42,6 +63,10 @@ export class MemoryTemporaryStore implements TemporaryStore {
     const item = this.current(`gasless:quote:${quoteId}`);
     return item ? JSON.parse(item.value) as TransactionQuote : null;
   }
+  async saveCrossChainQuote(quote: StoredCrossChainQuote, ttlSeconds: number) { this.values.set(`gasless:cross-chain:${quote.quote.quoteId}`, { value: JSON.stringify(quote), expires: this.now() + ttlSeconds * 1000 }); }
+  async getCrossChainQuote(quoteId: string) { const item = this.current(`gasless:cross-chain:${quoteId}`); return item ? JSON.parse(item.value) as StoredCrossChainQuote : null; }
+  async saveCrossChainAttempt(attempt: StoredCrossChainAttempt, ttlSeconds: number) { this.values.set(`gasless:cross-chain-attempt:${attempt.transactionId}`, { value: JSON.stringify(attempt), expires: this.now() + ttlSeconds * 1000 }); }
+  async getCrossChainAttempt(transactionId: string) { const item = this.current(`gasless:cross-chain-attempt:${transactionId}`); return item ? JSON.parse(item.value) as StoredCrossChainAttempt : null; }
   async setAuthoritativeSwapQuote(key: string, quoteId: string, version: number, ttlSeconds: number) {
     const namespaced = `gasless:swap-authority:${key}`; const current = this.current(namespaced); const currentVersion = Number(current?.value.split('|', 1)[0] ?? -1);
     if (current && currentVersion > version) return false;
@@ -111,6 +136,13 @@ export class UpstashTemporaryStore implements TemporaryStore {
     const value = await this.command<string | null>(['GET', `gasless:session:${sessionId}`]);
     return value ? JSON.parse(value) as WalletSession : null;
   }
+  async saveBrowserVerification(session: BrowserVerificationSession, ttlSeconds: number) {
+    await this.command(['SET', `gasless:browser:${session.sessionId}`, JSON.stringify(session), 'EX', ttlSeconds]);
+  }
+  async getBrowserVerification(sessionId: string) {
+    const value = await this.command<string | null>(['GET', `gasless:browser:${sessionId}`]);
+    return value ? JSON.parse(value) as BrowserVerificationSession : null;
+  }
   async saveQuote(quote: TransactionQuote, ttlSeconds: number) {
     await this.command(['SET', `gasless:quote:${quote.quoteId}`, JSON.stringify(quote), 'EX', ttlSeconds]);
   }
@@ -118,6 +150,10 @@ export class UpstashTemporaryStore implements TemporaryStore {
     const value = await this.command<string | null>(['GET', `gasless:quote:${quoteId}`]);
     return value ? JSON.parse(value) as TransactionQuote : null;
   }
+  async saveCrossChainQuote(quote: StoredCrossChainQuote, ttlSeconds: number) { await this.command(['SET', `gasless:cross-chain:${quote.quote.quoteId}`, JSON.stringify(quote), 'EX', ttlSeconds]); }
+  async getCrossChainQuote(quoteId: string) { const value = await this.command<string | null>(['GET', `gasless:cross-chain:${quoteId}`]); return value ? JSON.parse(value) as StoredCrossChainQuote : null; }
+  async saveCrossChainAttempt(attempt: StoredCrossChainAttempt, ttlSeconds: number) { await this.command(['SET', `gasless:cross-chain-attempt:${attempt.transactionId}`, JSON.stringify(attempt), 'EX', ttlSeconds]); }
+  async getCrossChainAttempt(transactionId: string) { const value = await this.command<string | null>(['GET', `gasless:cross-chain-attempt:${transactionId}`]); return value ? JSON.parse(value) as StoredCrossChainAttempt : null; }
   async setAuthoritativeSwapQuote(key: string, quoteId: string, version: number, ttlSeconds: number) {
     const namespaced = `gasless:swap-authority:${key}`;
     const script = "local value=redis.call('get',KEYS[1]); if value then local split=string.find(value,'|'); local current=tonumber(string.sub(value,1,split-1)); if current>tonumber(ARGV[1]) then return 0 end end; redis.call('set',KEYS[1],ARGV[1]..'|'..ARGV[2],'EX',ARGV[3]); return 1";

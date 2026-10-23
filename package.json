@@ -41,7 +41,7 @@
     "react-dom": "^19.1.0",
     "three": "^0.185.1",
     "typescript": "^5.8.0",
-    "vite": "^7.0.0"
+    "vite": "^7.3.7"
   },
   "devDependencies": {
     "@types/bs58": "4.0.1",
